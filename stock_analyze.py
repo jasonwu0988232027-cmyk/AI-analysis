@@ -1,6 +1,7 @@
 import streamlit as st
 import yfinance as yf
 import pandas as pd
+import numpy as np
 import requests
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
@@ -8,92 +9,102 @@ from datetime import datetime, timedelta
 # --- API 設定 ---
 FINNHUB_API_KEY = "d5t2rvhr01qt62ngu1kgd5t2rvhr01qt62ngu1l0"
 
-st.set_page_config(page_title="AI 股市智囊團", layout="wide")
+st.set_page_config(page_title="AI 股市預測專家", layout="wide")
 
-# --- 1. 穩定的股價抓取 (使用 yfinance + Cache) ---
+# --- 1. 數據獲取 ---
 @st.cache_data(ttl=3600)
 def get_stock_data(symbol):
     try:
-        # 下載最近一個月的數據
-        df = yf.download(symbol, period="1mo", interval="1d", progress=False)
-        if df.empty:
-            return None
-        # 修正 yfinance 回傳的多層索引問題
+        df = yf.download(symbol, period="3mo", interval="1d", progress=False)
+        if df.empty: return None
         df.columns = [col[0] if isinstance(col, tuple) else col for col in df.columns]
         return df.reset_index()
     except:
         return None
 
-# --- 2. Finnhub 情緒分析 ---
+# --- 2. 模擬未來 10 天預測邏輯 ---
+def predict_future_prices(df, sentiment_score, days=10):
+    # 基於最後一天的收盤價
+    last_price = df['Close'].iloc[-1]
+    last_date = df['Date'].iloc[-1]
+    
+    # 計算近期波動率作為預測基礎
+    volatility = df['Close'].pct_change().std() 
+    # 情緒影響因子 (將 0~1 的情緒轉化為 -1% ~ +1% 的每日偏移)
+    bias = (sentiment_score - 0.5) * 0.02 
+    
+    future_dates = [last_date + timedelta(days=i) for i in range(1, days + 1)]
+    future_prices = []
+    
+    current_price = last_price
+    for _ in range(days):
+        # 簡單隨機漫步模型 + 情緒偏差
+        change_pct = np.random.normal(bias, volatility)
+        current_price *= (1 + change_pct)
+        future_prices.append(current_price)
+        
+    return pd.DataFrame({'Date': future_dates, 'Close': future_prices})
+
+# --- 3. Finnhub 情緒抓取 ---
 @st.cache_data(ttl=3600)
 def get_finnhub_sentiment(symbol):
-    # Finnhub 格式轉換：2330.TW -> 2330 (有時需要去掉後綴)
     clean_symbol = symbol.split('.')[0]
     url = f"https://finnhub.io/api/v1/news-sentiment?symbol={clean_symbol}&token={FINNHUB_API_KEY}"
     try:
         res = requests.get(url).json()
         return res
-    except:
-        return None
+    except: return None
 
-# --- 介面設計 ---
-st.title("📈 AI 股市與行業變動預測")
+# --- UI 介面 ---
+st.title("📈 AI 股市趨勢分析與 10 日走勢預測")
 
-# 側邊欄輸入
-st.sidebar.header("設定")
-target_stock = st.sidebar.text_input("請輸入股票代碼 (台股請加 .TW)", "2330.TW").upper()
-st.sidebar.markdown("---")
-st.sidebar.info("💡 **測試建議**：\n1. 輸入 `AAPL` 測試美股\n2. 輸入 `2330.TW` 測試台股")
+target_stock = st.sidebar.text_input("輸入股票代碼 (例: 2330.TW)", "2330.TW").upper()
+forecast_days = st.sidebar.slider("預測天數", 5, 10, 7)
 
-# 執行抓取
 df = get_stock_data(target_stock)
 sentiment_data = get_finnhub_sentiment(target_stock)
+sent_score = sentiment_data['sentiment'].get('bullishPercent', 0.5) if sentiment_data and 'sentiment' in sentiment_data else 0.5
 
 if df is not None:
-    col1, col2 = st.columns([2, 1])
+    # 執行預測
+    future_df = predict_future_prices(df, sent_score, days=forecast_days)
+    
+    # 繪製圖表
+    st.subheader(f"📊 {target_stock} 歷史走勢與 AI 預期路徑")
+    
+    fig = go.Figure()
 
+    # 歷史 K 線
+    fig.add_trace(go.Candlestick(
+        x=df['Date'], open=df['Open'], high=df['High'],
+        low=df['Low'], close=df['Close'], name="歷史數據"
+    ))
+
+    # 預測走勢 (虛線)
+    # 連接歷史最後一天與預測第一天
+    connect_df = pd.concat([df.tail(1)[['Date', 'Close']], future_df])
+    
+    fig.add_trace(go.Scatter(
+        x=connect_df['Date'], y=connect_df['Close'],
+        mode='lines+markers',
+        line=dict(color='orange', width=3, dash='dot'),
+        name=f"AI 預測未來 {forecast_days} 日"
+    ))
+
+    fig.update_layout(xaxis_rangeslider_visible=False, height=600, template="plotly_dark")
+    st.plotly_chart(fig, use_container_width=True)
+
+    # --- 分析面板 ---
+    col1, col2 = st.columns(2)
     with col1:
-        st.subheader(f"📊 {target_stock} 近期走勢")
-        fig = go.Figure(data=[go.Candlestick(
-            x=df['Date'],
-            open=df['Open'], high=df['High'],
-            low=df['Low'], close=df['Close']
-        )])
-        fig.update_layout(xaxis_rangeslider_visible=False, height=450)
-        st.plotly_chart(fig, use_container_width=True)
-
+        st.write("### 📉 數據摘要")
+        st.write(f"當前價格: `{df['Close'].iloc[-1]:.2f}`")
+        st.write(f"預計 {forecast_days} 日後價格: `{future_df['Close'].iloc[-1]:.2f}`")
+        
     with col2:
-        st.subheader("🤖 市場情緒指標")
-        if sentiment_data and 'sentiment' in sentiment_data:
-            bullish = sentiment_data['sentiment'].get('bullishPercent', 0)
-            st.metric("Finnhub 看漲情緒", f"{bullish*100:.1f}%")
-            st.write(f"行業平均看漲: {sentiment_data.get('sectorAverageBullishPercent', 0)*100:.1f}%")
-            
-            # 簡單情緒進度條
-            st.progress(bullish)
-        else:
-            st.warning("此代碼目前暫無 Finnhub 情緒數據。")
-            st.info("提示：Finnhub 免費版主要支援美股，台股建議參考下方 AI 分析。")
-
-    # --- AI 綜合預測區域 ---
-    st.divider()
-    st.subheader("📋 AI 五日行業趨勢分析報告")
-    
-    # 提取數據特徵供 AI 判斷
-    last_price = df['Close'].iloc[-1]
-    first_price = df['Close'].iloc[0]
-    price_change = ((last_price / first_price) - 1) * 100
-    
-    analysis_text = f"""
-    **【大數據分析結論】**
-    * **價格動能**：過去一個月該標的走勢為 {'上升' if price_change > 0 else '修正'}，變動幅度為 {price_change:.2f}%。
-    * **行業變動**：參考最近 Yahoo 股市新聞與市場數據，該行業目前處於 {'資金流入' if price_change > 2 else '觀望'} 階段。
-    * **未來5日走勢預測**：
-        1. {'若突破壓力位，有機會延續漲勢。' if price_change > 0 else '短期內建議關注支撐點位。'}
-        2. 建議投資者關注行業相關的半導體/供應鏈最新新聞。
-    """
-    st.success(analysis_text)
+        st.write("### 🧠 AI 預測依據")
+        st.write(f"市場情緒權重: `{sent_score:.2f}`")
+        st.write(f"技術面波動率: `{df['Close'].pct_change().std():.4f}`")
 
 else:
-    st.error("❌ 無法獲取股價數據。")
-    st.info("請檢查股票代碼格式是否正確（例如台股 2330.TW 或美股 AAPL）。")
+    st.error("無法獲取數據，請檢查代碼格式。")
