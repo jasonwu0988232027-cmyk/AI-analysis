@@ -1,82 +1,98 @@
 import streamlit as st
-import yfinance as yf
 import pandas as pd
 import requests
-from bs4 import BeautifulSoup
+import plotly.graph_objects as go
 from datetime import datetime, timedelta
 
-# --- 頁面設定 ---
-st.set_page_config(page_title="AI 股市智囊團", layout="wide")
-st.title("📈 AI 股市行業變動與個股預測")
+# --- 設定 Finnhub API Key ---
+FINNHUB_API_KEY = "你的_FINNHUB_API_KEY" # <--- 請換成你的 Key
 
-# --- 1. 爬蟲函數 ---
-def get_yahoo_news(stock_id=None):
-    if stock_id:
-        url = f"https://tw.stock.yahoo.com/quote/{stock_id}/news"
-    else:
-        url = "https://tw.stock.yahoo.com/news/"
+st.set_page_config(page_title="專業級 AI 股市分析", layout="wide")
+st.title("🏛️ 官方 API 驅動：股市行業情緒與預測")
+
+# --- 1. 獲取股價數據 (替代 yfinance) ---
+@st.cache_data(ttl=600)
+def get_stock_candles(symbol):
+    # Finnhub 使用的是 Unix Timestamp
+    end = int(datetime.now().timestamp())
+    start = int((datetime.now() - timedelta(days=30)).timestamp())
     
-    headers = {'User-Agent': 'Mozilla/5.0'}
-    try:
-        res = requests.get(url, headers=headers)
-        soup = BeautifulSoup(res.text, 'html.parser')
-        # 抓取新聞標題
-        titles = soup.find_all('h3', class_='Mt(0) Mb(8px)', limit=10)
-        return [t.get_text() for t in titles]
-    except:
-        return ["無法取得新聞數據"]
+    # 台股需轉換格式，例如 2330.TW -> 2330.TW (Finnhub 支援美股與部分國際股市)
+    # 注意：Finnhub 免費版對台股支援度視地區而定，建議先測試美股如 AAPL
+    url = f"https://finnhub.io/api/v1/stock/candle?symbol={symbol}&resolution=D&from={start}&to={end}&token={FINNHUB_API_KEY}"
+    res = requests.get(url).json()
+    
+    if res.get('s') == 'ok':
+        df = pd.DataFrame({
+            'Date': pd.to_datetime(res['t'], unit='s'),
+            'Close': res['c'],
+            'Open': res['o'],
+            'High': res['h'],
+            'Low': res['l']
+        })
+        return df
+    return pd.DataFrame()
 
-# --- 2. 模擬 AI 情緒分析 (可替換為 OpenAI/Gemini API) ---
-def analyze_sentiment(news_list):
-    # 這裡建議串接 OpenAI API，目前以模擬邏輯演示
-    results = []
-    for news in news_list:
-        # 模擬分數: 隨機模擬 AI 判斷（實際應用時請調用 LLM）
-        score = 0.5 if "漲" in news or "旺" in news else (-0.5 if "跌" in news or "壓力" in news else 0.1)
-        results.append({"標題": news, "情緒分數": score})
-    return pd.DataFrame(results)
+# --- 2. 獲取新聞情緒分析 (內建 AI 判斷) ---
+@st.cache_data(ttl=3600)
+def get_sentiment(symbol):
+    url = f"https://finnhub.io/api/v1/news-sentiment?symbol={symbol}&token={FINNHUB_API_KEY}"
+    res = requests.get(url).json()
+    return res
 
-# --- 側邊欄：使用者輸入 ---
-st.sidebar.header("搜尋參數")
-stock_input = st.sidebar.text_input("請輸入股票代碼 (例如: 2330.TW)", "2330.TW")
-days_to_look = st.sidebar.slider("歷史數據天數", 5, 30, 14)
+# --- 側邊欄 ---
+st.sidebar.header("搜尋設定")
+# Finnhub 免費版對美股(AAPL, TSLA)支援最完美，台股格式通常為 2330.TW
+stock_symbol = st.sidebar.text_input("輸入股票代碼", "AAPL") 
 
-# --- 主畫面佈局 ---
-col1, col2 = st.columns([1, 1])
+# --- 主畫面 ---
+col1, col2 = st.columns([2, 1])
 
 with col1:
-    st.subheader(f"📊 {stock_input} 近期走勢")
-    stock_data = yf.Ticker(stock_input)
-    df = stock_data.history(period=f"{days_to_look}d")
+    df = get_stock_candles(stock_symbol)
     if not df.empty:
-        st.line_chart(df['Close'])
-        st.write("最新收盤價：", round(df['Close'].iloc[-1], 2))
+        st.subheader(f"📈 {stock_symbol} 價格走勢 (K線圖)")
+        fig = go.Figure(data=[go.Candlestick(x=df['Date'],
+                open=df['Open'], high=df['High'],
+                low=df['Low'], close=df['Close'])])
+        st.plotly_chart(fig, use_container_width=True)
     else:
-        st.error("找不到該股票數據，請確保代碼正確（如台股需加 .TW）")
+        st.error("無法獲取數據，請確認 API Key 或代碼是否正確。")
 
 with col2:
-    st.subheader("📰 最新消息與情緒分析")
-    news_data = get_yahoo_news(stock_input.split('.')[0])
-    sentiment_df = analyze_sentiment(news_data)
+    st.subheader("🤖 官方情緒指標")
+    sentiment = get_sentiment(stock_symbol)
     
-    # 顯示情緒圖表
-    avg_score = sentiment_df['情緒分數'].mean()
-    st.metric("平均市場情緒", f"{avg_score:.2f}", delta="偏多" if avg_score > 0 else "偏空")
-    st.dataframe(sentiment_df)
-
-# --- AI 綜合預測 ---
-st.divider()
-st.subheader("🤖 AI 綜合預測報告")
-if st.button("生成分析報告"):
-    with st.spinner('AI 正在分析技術面與消息面...'):
-        # 這裡組合 Prompt 傳給 AI
-        tech_info = f"過去{days_to_look}天平均股價: {df['Close'].mean():.2f}"
-        news_info = ", ".join(news_data)
+    if 'sentiment' in sentiment:
+        # Finnhub 提供的看漲看跌比例
+        bullish = sentiment['sentiment'].get('bullishPercent', 0)
+        st.metric("市場看漲情緒", f"{bullish*100:.1f}%")
         
-        # 模擬 AI 回傳內容
-        st.info(f"""
-        **【AI 判斷結果】**
-        1. **消息面**：當前新聞情緒分數為 {avg_score:.2f}，市場對該行業/個股抱持{'樂觀' if avg_score > 0 else '謹慎'}態度。
-        2. **技術面**：參考近期收盤價，目前處於{'上升' if df['Close'].iloc[-1] > df['Close'].iloc[0] else '修正'}階段。
-        3. **5日預測**：結合{stock_input}的新聞與股價，預計未來 5 天將呈現{'震盪向上' if avg_score > 0 else '壓力測試'}，重點關注行業出口數據。
-        """)
+        # 繪製情緒圓餅圖
+        st.write("近期新聞情緒分布：")
+        st.json({
+            "看漲新聞比率": bullish,
+            "行業平均情緒": sentiment.get('sectorAverageBullishPercent', 0)
+        })
+    else:
+        st.info("該代碼目前無足夠新聞進行情緒分析。")
+
+# --- AI 行業變動分析 ---
+st.divider()
+st.subheader("📋 AI 5日行業趨勢預測")
+if st.button("綜合分析技術面 + 消息面"):
+    if not df.empty and 'sentiment' in sentiment:
+        # 這裡結合真實數據生成判斷
+        price_change = ((df['Close'].iloc[-1] / df['Close'].iloc[0]) - 1) * 100
+        sent_score = sentiment['sentiment'].get('bullishPercent', 0)
+        
+        analysis = f"""
+        **分析報告：**
+        1. **技術面**：過去30天股價變動約 {price_change:.2f}%。
+        2. **消息面**：Finnhub AI 監測到市場看漲情緒為 {sent_score*100:.1f}%。
+        3. **綜合預測**：由於情緒{'高於' if sent_score > 0.5 else '低於'}中值，且股價走勢{'穩定' if price_change > 0 else '疲軟'}，
+           預計未來 5 天該行業將會{'延續漲勢' if sent_score > 0.6 else '進入高檔震盪'}。
+        """
+        st.success(analysis)
+    else:
+        st.warning("數據不足，無法生成報告。")
