@@ -1,5 +1,27 @@
-streamlit
-yfinance
-pandas
-plotly
-requests
+# AI 股市預測系統 - 依賴套件清單
+
+# 核心框架
+streamlit==1.31.0
+
+# 數據處理
+pandas==2.1.4
+numpy==1.24.3
+
+# 股票數據
+yfinance==0.2.36
+
+# 技術指標計算
+ta==0.11.0
+
+# 機器學習 / 深度學習
+tensorflow==2.15.0
+scikit-learn==1.3.2
+
+# 數據可視化
+plotly==5.18.0
+
+# HTTP 請求
+requests==2.31.0
+
+# 其他工具
+python-dateutil==2.8.2
