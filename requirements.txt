@@ -1,20 +1,20 @@
 # AI 股市預測系統 Lite - 最小化依賴
 
 # 核心框架
-streamlit==1.31.0
+streamlit
 
 # 數據處理
-pandas==2.1.4
-numpy==1.26.4
+pandas
+numpy
 
 # 股票數據
-yfinance==0.2.36
+yfinance
 
 # 數據可視化
-plotly==5.18.0
+plotly
 
 # HTTP 請求
-requests==2.31.0
+requests
 
 # 日期處理
-python-dateutil==2.8.2
+python-dateutil
