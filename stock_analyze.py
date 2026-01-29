@@ -5,13 +5,29 @@ import numpy as np
 import requests
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
-import ta
-from sklearn.preprocessing import MinMaxScaler
-from sklearn.metrics import mean_absolute_error, mean_squared_error
-import tensorflow as tf
-from tensorflow import keras
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import LSTM, Dense, Dropout, Input
+try:
+    import ta
+    TA_AVAILABLE = True
+except ImportError:
+    TA_AVAILABLE = False
+    st.warning("⚠️ 技術指標套件 'ta' 未安裝，部分功能將受限。請執行: pip install ta")
+
+try:
+    from sklearn.preprocessing import MinMaxScaler
+    from sklearn.metrics import mean_absolute_error, mean_squared_error
+    SKLEARN_AVAILABLE = True
+except ImportError:
+    SKLEARN_AVAILABLE = False
+
+try:
+    import tensorflow as tf
+    from tensorflow import keras
+    from tensorflow.keras.models import Sequential
+    from tensorflow.keras.layers import LSTM, Dense, Dropout, Input
+    TF_AVAILABLE = True
+except ImportError:
+    TF_AVAILABLE = False
+
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -69,48 +85,116 @@ def get_fundamental_data(symbol):
 
 def calculate_technical_indicators(df):
     """計算各種技術指標"""
+    if not TA_AVAILABLE:
+        # 如果 ta 套件不可用，使用簡化版計算
+        return calculate_basic_indicators(df)
+    
     df_copy = df.copy()
     
-    # MACD
-    macd = ta.trend.MACD(df_copy['Close'])
-    df_copy['MACD'] = macd.macd()
-    df_copy['MACD_Signal'] = macd.macd_signal()
-    df_copy['MACD_Diff'] = macd.macd_diff()
-    
-    # RSI
-    df_copy['RSI'] = ta.momentum.RSIIndicator(df_copy['Close'], window=14).rsi()
-    
-    # 布林通道
-    bollinger = ta.volatility.BollingerBands(df_copy['Close'])
-    df_copy['BB_High'] = bollinger.bollinger_hband()
-    df_copy['BB_Mid'] = bollinger.bollinger_mavg()
-    df_copy['BB_Low'] = bollinger.bollinger_lband()
-    df_copy['BB_Width'] = (df_copy['BB_High'] - df_copy['BB_Low']) / df_copy['BB_Mid']
-    
-    # 移動平均線
-    df_copy['SMA_20'] = ta.trend.SMAIndicator(df_copy['Close'], window=20).sma_indicator()
-    df_copy['SMA_50'] = ta.trend.SMAIndicator(df_copy['Close'], window=50).sma_indicator()
-    df_copy['EMA_12'] = ta.trend.EMAIndicator(df_copy['Close'], window=12).ema_indicator()
-    df_copy['EMA_26'] = ta.trend.EMAIndicator(df_copy['Close'], window=26).ema_indicator()
-    
-    # KD 指標
-    stoch = ta.momentum.StochasticOscillator(df_copy['High'], df_copy['Low'], df_copy['Close'])
-    df_copy['K'] = stoch.stoch()
-    df_copy['D'] = stoch.stoch_signal()
-    
-    # ATR (平均真實波幅)
-    df_copy['ATR'] = ta.volatility.AverageTrueRange(df_copy['High'], df_copy['Low'], df_copy['Close']).average_true_range()
-    
-    # OBV (能量潮)
-    df_copy['OBV'] = ta.volume.OnBalanceVolumeIndicator(df_copy['Close'], df_copy['Volume']).on_balance_volume()
-    
-    # ADX (趨勢強度)
-    df_copy['ADX'] = ta.trend.ADXIndicator(df_copy['High'], df_copy['Low'], df_copy['Close']).adx()
-    
-    # 威廉指標
-    df_copy['Williams_R'] = ta.momentum.WilliamsRIndicator(df_copy['High'], df_copy['Low'], df_copy['Close']).williams_r()
+    try:
+        # MACD
+        macd = ta.trend.MACD(df_copy['Close'])
+        df_copy['MACD'] = macd.macd()
+        df_copy['MACD_Signal'] = macd.macd_signal()
+        df_copy['MACD_Diff'] = macd.macd_diff()
+        
+        # RSI
+        df_copy['RSI'] = ta.momentum.RSIIndicator(df_copy['Close'], window=14).rsi()
+        
+        # 布林通道
+        bollinger = ta.volatility.BollingerBands(df_copy['Close'])
+        df_copy['BB_High'] = bollinger.bollinger_hband()
+        df_copy['BB_Mid'] = bollinger.bollinger_mavg()
+        df_copy['BB_Low'] = bollinger.bollinger_lband()
+        df_copy['BB_Width'] = (df_copy['BB_High'] - df_copy['BB_Low']) / df_copy['BB_Mid']
+        
+        # 移動平均線
+        df_copy['SMA_20'] = ta.trend.SMAIndicator(df_copy['Close'], window=20).sma_indicator()
+        df_copy['SMA_50'] = ta.trend.SMAIndicator(df_copy['Close'], window=50).sma_indicator()
+        df_copy['EMA_12'] = ta.trend.EMAIndicator(df_copy['Close'], window=12).ema_indicator()
+        df_copy['EMA_26'] = ta.trend.EMAIndicator(df_copy['Close'], window=26).ema_indicator()
+        
+        # KD 指標
+        stoch = ta.momentum.StochasticOscillator(df_copy['High'], df_copy['Low'], df_copy['Close'])
+        df_copy['K'] = stoch.stoch()
+        df_copy['D'] = stoch.stoch_signal()
+        
+        # ATR (平均真實波幅)
+        df_copy['ATR'] = ta.volatility.AverageTrueRange(df_copy['High'], df_copy['Low'], df_copy['Close']).average_true_range()
+        
+        # OBV (能量潮)
+        df_copy['OBV'] = ta.volume.OnBalanceVolumeIndicator(df_copy['Close'], df_copy['Volume']).on_balance_volume()
+        
+        # ADX (趨勢強度)
+        df_copy['ADX'] = ta.trend.ADXIndicator(df_copy['High'], df_copy['Low'], df_copy['Close']).adx()
+        
+        # 威廉指標
+        df_copy['Williams_R'] = ta.momentum.WilliamsRIndicator(df_copy['High'], df_copy['Low'], df_copy['Close']).williams_r()
+        
+    except Exception as e:
+        st.error(f"技術指標計算錯誤: {str(e)}")
+        return calculate_basic_indicators(df_copy)
     
     # 填充 NaN 值
+    df_copy = df_copy.fillna(method='bfill').fillna(method='ffill')
+    
+    return df_copy
+
+def calculate_basic_indicators(df):
+    """計算基本技術指標（不依賴 ta 套件）"""
+    df_copy = df.copy()
+    
+    # 簡單移動平均
+    df_copy['SMA_20'] = df_copy['Close'].rolling(window=20).mean()
+    df_copy['SMA_50'] = df_copy['Close'].rolling(window=50).mean()
+    
+    # 簡單 RSI
+    delta = df_copy['Close'].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+    rs = gain / loss
+    df_copy['RSI'] = 100 - (100 / (1 + rs))
+    
+    # 簡單布林通道
+    df_copy['BB_Mid'] = df_copy['Close'].rolling(window=20).mean()
+    bb_std = df_copy['Close'].rolling(window=20).std()
+    df_copy['BB_High'] = df_copy['BB_Mid'] + (bb_std * 2)
+    df_copy['BB_Low'] = df_copy['BB_Mid'] - (bb_std * 2)
+    df_copy['BB_Width'] = (df_copy['BB_High'] - df_copy['BB_Low']) / df_copy['BB_Mid']
+    
+    # EMA
+    df_copy['EMA_12'] = df_copy['Close'].ewm(span=12, adjust=False).mean()
+    df_copy['EMA_26'] = df_copy['Close'].ewm(span=26, adjust=False).mean()
+    
+    # MACD
+    df_copy['MACD'] = df_copy['EMA_12'] - df_copy['EMA_26']
+    df_copy['MACD_Signal'] = df_copy['MACD'].ewm(span=9, adjust=False).mean()
+    df_copy['MACD_Diff'] = df_copy['MACD'] - df_copy['MACD_Signal']
+    
+    # KD 指標
+    low_14 = df_copy['Low'].rolling(window=14).min()
+    high_14 = df_copy['High'].rolling(window=14).max()
+    df_copy['K'] = 100 * ((df_copy['Close'] - low_14) / (high_14 - low_14))
+    df_copy['D'] = df_copy['K'].rolling(window=3).mean()
+    
+    # ATR
+    high_low = df_copy['High'] - df_copy['Low']
+    high_close = np.abs(df_copy['High'] - df_copy['Close'].shift())
+    low_close = np.abs(df_copy['Low'] - df_copy['Close'].shift())
+    ranges = pd.concat([high_low, high_close, low_close], axis=1)
+    true_range = np.max(ranges, axis=1)
+    df_copy['ATR'] = true_range.rolling(14).mean()
+    
+    # OBV
+    df_copy['OBV'] = (np.sign(df_copy['Close'].diff()) * df_copy['Volume']).fillna(0).cumsum()
+    
+    # ADX (簡化版)
+    df_copy['ADX'] = df_copy['ATR'].rolling(window=14).mean() / df_copy['Close'] * 100
+    
+    # Williams %R
+    df_copy['Williams_R'] = -100 * ((high_14 - df_copy['Close']) / (high_14 - low_14))
+    
+    # 填充 NaN
     df_copy = df_copy.fillna(method='bfill').fillna(method='ffill')
     
     return df_copy
@@ -119,6 +203,9 @@ def calculate_technical_indicators(df):
 
 def prepare_lstm_data(df, lookback=60):
     """準備 LSTM 訓練數據"""
+    if not SKLEARN_AVAILABLE:
+        raise ImportError("scikit-learn 未安裝，無法使用 LSTM 功能")
+    
     # 選擇特徵
     feature_columns = ['Close', 'Volume', 'MACD', 'RSI', 'BB_Width', 'ATR', 'OBV', 'ADX']
     
@@ -142,6 +229,9 @@ def prepare_lstm_data(df, lookback=60):
 
 def build_lstm_model(input_shape):
     """構建 LSTM 模型"""
+    if not TF_AVAILABLE:
+        raise ImportError("TensorFlow 未安裝，無法使用 LSTM 功能")
+    
     model = Sequential([
         Input(shape=input_shape),
         LSTM(128, return_sequences=True),
@@ -160,6 +250,9 @@ def build_lstm_model(input_shape):
 @st.cache_resource
 def train_lstm_model(df, lookback=60, epochs=50):
     """訓練 LSTM 模型"""
+    if not TF_AVAILABLE or not SKLEARN_AVAILABLE:
+        raise ImportError("需要安裝 TensorFlow 和 scikit-learn 才能使用 LSTM 功能")
+    
     X, y, scaler, features = prepare_lstm_data(df, lookback)
     
     # 分割訓練集和測試集
@@ -199,6 +292,9 @@ def train_lstm_model(df, lookback=60, epochs=50):
 
 def predict_lstm(model, df, scaler, features, lookback=60, days=10):
     """使用 LSTM 進行預測"""
+    if not SKLEARN_AVAILABLE:
+        raise ImportError("scikit-learn 未安裝，無法使用 LSTM 功能")
+    
     # 準備最後 lookback 天的數據
     feature_columns = features
     last_data = df[feature_columns].tail(lookback).values
@@ -469,32 +565,46 @@ def main():
         
         # 模型預測
         if model_choice == "LSTM 深度學習":
-            try:
-                model, scaler, features, metrics, test_data = train_lstm_model(df, epochs=lstm_epochs)
-                future_df = predict_lstm(model, df, scaler, features, days=forecast_days)
-                model_name = "LSTM"
-            except Exception as e:
-                st.warning(f"LSTM 訓練失敗，切換至傳統方法: {str(e)}")
+            if not TF_AVAILABLE or not SKLEARN_AVAILABLE:
+                st.error("❌ LSTM 需要安裝 TensorFlow 和 scikit-learn。請執行：pip install tensorflow scikit-learn")
+                st.info("⏳ 自動切換至傳統技術分析方法...")
                 future_df = predict_traditional(df, sent_score, days=forecast_days)
                 model_name = "Traditional"
                 metrics = None
+            else:
+                try:
+                    model, scaler, features, metrics, test_data = train_lstm_model(df, epochs=lstm_epochs)
+                    future_df = predict_lstm(model, df, scaler, features, days=forecast_days)
+                    model_name = "LSTM"
+                except Exception as e:
+                    st.warning(f"⚠️ LSTM 訓練失敗，切換至傳統方法: {str(e)}")
+                    future_df = predict_traditional(df, sent_score, days=forecast_days)
+                    model_name = "Traditional"
+                    metrics = None
         elif model_choice == "傳統技術分析":
             future_df = predict_traditional(df, sent_score, days=forecast_days)
             model_name = "Traditional"
             metrics = None
         else:  # 混合模型
-            try:
-                model, scaler, features, metrics, test_data = train_lstm_model(df, epochs=lstm_epochs)
-                lstm_pred = predict_lstm(model, df, scaler, features, days=forecast_days)
-                trad_pred = predict_traditional(df, sent_score, days=forecast_days)
-                # 混合：70% LSTM + 30% 傳統
-                future_df = lstm_pred.copy()
-                future_df['Close'] = 0.7 * lstm_pred['Close'] + 0.3 * trad_pred['Close']
-                model_name = "Hybrid"
-            except:
+            if not TF_AVAILABLE or not SKLEARN_AVAILABLE:
+                st.warning("⚠️ 混合模型需要 LSTM 支援，自動切換至傳統方法")
                 future_df = predict_traditional(df, sent_score, days=forecast_days)
                 model_name = "Traditional"
                 metrics = None
+            else:
+                try:
+                    model, scaler, features, metrics, test_data = train_lstm_model(df, epochs=lstm_epochs)
+                    lstm_pred = predict_lstm(model, df, scaler, features, days=forecast_days)
+                    trad_pred = predict_traditional(df, sent_score, days=forecast_days)
+                    # 混合：70% LSTM + 30% 傳統
+                    future_df = lstm_pred.copy()
+                    future_df['Close'] = 0.7 * lstm_pred['Close'] + 0.3 * trad_pred['Close']
+                    model_name = "Hybrid"
+                except Exception as e:
+                    st.warning(f"⚠️ 混合模型建立失敗: {str(e)}")
+                    future_df = predict_traditional(df, sent_score, days=forecast_days)
+                    model_name = "Traditional"
+                    metrics = None
         
         # ===== 圖表展示 =====
         st.subheader(f"📊 {symbol} 技術分析與預測")
