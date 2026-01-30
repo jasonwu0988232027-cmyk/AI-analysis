@@ -1,10 +1,10 @@
 streamlit
+yfinance
 pandas
 numpy
-yfinance
-ta
+requests
+plotly
 tensorflow
 scikit-learn
-plotly
-requests
-python-dateutil
+gspread
+oauth2client
