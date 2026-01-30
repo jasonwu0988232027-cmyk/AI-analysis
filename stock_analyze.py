@@ -1,7 +1,7 @@
 import streamlit as st
 
 # --- 頁面配置 ---
-st.set_page_config(page_title="AI 股市預測專家 Pro v8 (雲端適配版)", layout="wide")
+st.set_page_config(page_title="AI 股市預測專家 Pro v9 (現代架構版)", layout="wide")
 
 import yfinance as yf
 import pandas as pd
@@ -16,14 +16,14 @@ import urllib3
 # 停用 SSL 警告
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# 載入必要庫
+# 載入必要庫 (改用 google-auth)
 try:
     import gspread
-    from oauth2client.service_account import ServiceAccountCredentials
+    from google.oauth2.service_account import Credentials # <--- 這是新的
     import tensorflow as tf
     from sklearn.preprocessing import MinMaxScaler
 except ImportError:
-    st.error("缺少套件，請執行：pip install gspread oauth2client tensorflow scikit-learn urllib3 certifi")
+    st.error("缺少套件，請更新 requirements.txt：pip install gspread google-auth tensorflow scikit-learn")
 
 # --- 全局設定 ---
 CREDENTIALS_JSON = "credentials.json" 
@@ -54,26 +54,29 @@ def get_stock_data(symbol, period="1y"):
     except:
         return None
 
-# ==================== 2. 雲端同步模組 (支援 Secrets) ====================
+# ==================== 2. 雲端同步模組 (改用 google-auth) ====================
 
 def get_gspread_client():
-    scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
+    scopes = [
+        'https://www.googleapis.com/auth/spreadsheets',
+        'https://www.googleapis.com/auth/drive'
+    ]
     
-    # 【v8 關鍵功能】優先嘗試從 Streamlit Secrets 讀取
+    # 方式 A: 從 Streamlit Secrets 讀取 (優先)
     if "gcp_service_account" in st.secrets:
         try:
-            # 將 Secrets 轉換為標準字典
             creds_dict = dict(st.secrets["gcp_service_account"])
-            creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+            # 使用 google-auth 的新方法
+            creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
             return gspread.authorize(creds)
         except Exception as e:
             st.error(f"Secrets 設定有誤: {e}")
             return None
 
-    # 【備用】嘗試從本地檔案讀取
+    # 方式 B: 從本地檔案讀取
     elif os.path.exists(CREDENTIALS_JSON):
         try:
-            creds = ServiceAccountCredentials.from_json_keyfile_name(CREDENTIALS_JSON, scope)
+            creds = Credentials.from_service_account_file(CREDENTIALS_JSON, scopes=scopes)
             return gspread.authorize(creds)
         except Exception:
             return None
@@ -83,22 +86,26 @@ def get_gspread_client():
 def save_to_sheets(new_data):
     client = get_gspread_client()
     if client is None:
-        st.warning("⚠️ 無法連線至 Google Sheets。請確認 Secrets 已儲存且程式碼已更新為 v8。")
+        st.warning("⚠️ 無法連線至 Google Sheets。請檢查 Secrets 設定。")
         return False
         
     try:
         sh = client.open(SHEET_NAME)
         ws = sh.sheet1
+        # 如果是新表，寫入標題
         if ws.row_count <= 1 and (not ws.cell(1, 1).value):
             ws.append_row(["預測日期", "股票代碼", "目前價格", "7日預測價", "預期漲幅", "實際收盤價", "誤差%"])
+            
+        # 寫入數據
         ws.append_rows(new_data)
-        st.success("✅ 雲端存檔成功！")
+        st.success(f"✅ 成功寫入 {len(new_data)} 筆資料至雲端！")
         return True
     except Exception as e:
+        # 這裡會捕捉真正的錯誤
         st.error(f"❌ 雲端寫入失敗: {e}")
         return False
 
-# ==================== 3. 機器學習推論模組 (含末日模式) ====================
+# ==================== 3. 機器學習推論模組 ====================
 
 def generate_dummy_data():
     dates = pd.date_range(end=datetime.now(), periods=100)
@@ -108,12 +115,9 @@ def generate_dummy_data():
 
 @st.cache_resource
 def get_trained_base_model():
-    # 策略 1: 嘗試抓台積電
     df = get_stock_data("2330.TW")
-    # 策略 2: 失敗則嘗試抓鴻海
     if df is None or len(df) < 60:
         df = get_stock_data("2317.TW")
-    # 策略 3: 末日模式
     if df is None or len(df) < 60:
         df = generate_dummy_data()
 
@@ -154,7 +158,7 @@ def fast_predict(model, df):
 # ==================== 4. 主介面 ====================
 
 def main():
-    st.title("📈 AI 股市預測專家 Pro v8 (雲端適配版)")
+    st.title("📈 AI 股市預測專家 Pro v9 (現代架構版)")
     
     tab1, tab2 = st.tabs(["🚀 智能批次預測", "🧐 歷史反思"])
 
@@ -212,7 +216,7 @@ def main():
             except Exception as e:
                 st.error(f"讀取失敗: {e}")
         else:
-            st.info("請確認 Secrets 設定正確，並按一下左側的「開始執行預測」來測試連線。")
+            st.info("請確認 Secrets 設定。")
 
 if __name__ == "__main__":
     main()
