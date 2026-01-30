@@ -9,3 +9,6 @@ gspread
 google-auth
 tensorflow
 scikit-learn
+lxml
+html5lib
+beautifulsoup4
