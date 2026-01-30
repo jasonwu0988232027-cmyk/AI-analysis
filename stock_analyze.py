@@ -268,11 +268,33 @@ def get_batch_realtime_data(symbols, batch_size=10, cooldown_per_batch=2.0, cool
     
     return results
 
-# ==================== 2. 本地運算市場掃描引擎 ====================
+# ==================== 2. 使用 yfinance 進行市場掃描 (整合 stock_analyze.py 邏輯) ====================
+
+@st.cache_data(ttl=86400)
+def get_full_market_tickers():
+    """
+    從證交所官網獲取完整股票清單
+    """
+    url = "https://isin.twse.com.tw/isin/C_public.jsp?strMode=2"
+    try:
+        res = requests.get(url, timeout=10, verify=False, headers={'User-Agent': 'Mozilla/5.0'})
+        res.encoding = 'big5'
+        df = pd.read_html(res.text)[0]
+        df.columns = df.iloc[0]
+        df = df[df['有價證券代號及名稱'].str.contains("  ", na=False)]
+        tickers = [f"{t.split('  ')[0].strip()}.TW" for t in df['有價證券代號及名稱'] if len(t.split('  ')[0].strip()) == 4]
+        if len(tickers) > 800:
+            st.success(f"✅ 成功從證交所獲取 {len(tickers)} 檔股票清單")
+            return tickers
+    except Exception as e:
+        st.warning(f"⚠️ 證交所連線失敗: {e}，使用備用清單")
+    
+    # 備用清單
+    return get_market_universe()
 
 def get_market_universe():
     """
-    內建 400+ 檔台股活躍名單
+    備用股票清單 (約 200 檔活躍股票)
     """
     tickers = [
         # 半導體/權值
@@ -300,79 +322,101 @@ def get_market_universe():
     ]
     return list(set(tickers))
 
-def scan_top_100_by_value_local():
+def scan_market_by_turnover(use_full_list=False):
     """
-    掃描市場並計算成交值排行
-    使用即時報價 + 強化防封鎖機制
+    整合 stock_analyze.py 的市場掃描邏輯
+    
+    參數:
+    - use_full_list: True=使用完整市場清單(慢), False=使用精選清單(快)
+    
     返回: (top_100_tickers, turnover_data)
     """
-    tickers = get_market_universe()
-    st.info(f"🔍 載入全市場觀察名單 (共 {len(tickers)} 檔)，開始計算成交重心...")
-    st.warning("⏳ 為防止 API 封鎖，已啟用智能限速機制，預計需要 5-10 分鐘...")
+    # 選擇股票清單
+    if use_full_list:
+        all_tickers = get_full_market_tickers()
+        st.info(f"🔍 使用完整市場清單掃描 (共 {len(all_tickers)} 檔)...")
+    else:
+        all_tickers = get_market_universe()
+        st.info(f"🔍 使用精選活躍股清單掃描 (共 {len(all_tickers)} 檔)...")
+    
+    st.warning("⏳ 為防止 API 封鎖，已啟用智能限速機制...")
     
     results = []
-    
     progress = st.progress(0)
     status = st.empty()
     
-    # 使用批次處理，每批 10 檔，批次間休息 2 秒
-    batch_size = 10
-    cooldown_per_stock = 0.5  # 每支股票間隔 0.5 秒
-    cooldown_per_batch = 2.0  # 每批次間隔 2 秒
+    # 批次處理
+    batch_size = 50
     
-    for i in range(0, len(tickers), batch_size):
-        batch = tickers[i : i + batch_size]
-        status.text(f"正在掃描市場數據：第 {i+1} ~ {min(i+batch_size, len(tickers))} 檔... (智能限速中)")
+    for i in range(0, len(all_tickers), batch_size):
+        batch = all_tickers[i : i + batch_size]
+        status.text(f"正在掃描市場數據：第 {i+1} ~ {min(i+batch_size, len(all_tickers))} 檔...")
         
-        for stock in batch:
-            try:
-                # 使用即時報價 API
-                data = get_realtime_stock_data(stock, cooldown=cooldown_per_stock)
-                
-                if data['success'] and data['price']:
-                    price = data['price']
-                    volume = data['volume']
-                    turnover = (price * volume) / 1e8
+        try:
+            # 使用 yfinance 批次下載 (與 stock_analyze.py 相同方式)
+            data = yf.download(batch, period="2d", group_by='ticker', threads=True, progress=False)
+            
+            for ticker in batch:
+                try:
+                    # 處理 MultiIndex
+                    if isinstance(data.columns, pd.MultiIndex):
+                        if ticker in data.columns.levels[0]:
+                            ticker_df = data[ticker].dropna()
+                        else:
+                            continue
+                    else:
+                        ticker_df = data.dropna()
                     
-                    # 獲取股票名稱
-                    try:
-                        ticker_obj = yf.Ticker(stock)
-                        name = ticker_obj.info.get('longName', stock.split('.')[0])
-                    except:
-                        name = stock.split('.')[0]
+                    if not ticker_df.empty:
+                        last_row = ticker_df.iloc[-1]
+                        price = float(last_row['Close'])
+                        volume = float(last_row['Volume'])
+                        
+                        # 計算成交值 (億元)
+                        turnover = (price * volume) / 1e8
+                        
+                        # 獲取股票名稱
+                        try:
+                            ticker_obj = yf.Ticker(ticker)
+                            name = ticker_obj.info.get('longName', ticker.split('.')[0])
+                            time.sleep(0.1)  # 小延遲
+                        except:
+                            name = ticker.split('.')[0]
+                        
+                        results.append({
+                            "ticker": ticker,
+                            "name": name,
+                            "price": price,
+                            "volume": volume,
+                            "turnover": turnover
+                        })
+                except Exception as e:
+                    continue
                     
-                    results.append({
-                        "ticker": stock,
-                        "name": name,
-                        "price": price,
-                        "volume": volume,
-                        "turnover": turnover
-                    })
-            except Exception as e:
-                # 失敗時記錄但繼續
-                pass
+        except Exception as e:
+            st.warning(f"批次下載失敗: {e}")
+            pass
         
-        # 批次間額外休息
-        if i + batch_size < len(tickers):
-            time.sleep(cooldown_per_batch)
-        
-        progress.progress(min((i + batch_size) / len(tickers), 1.0))
+        # 批次間休息
+        time.sleep(random.uniform(0.5, 1.0))
+        progress.progress(min((i + batch_size) / len(all_tickers), 1.0))
     
     status.empty()
     progress.empty()
     
-    df_res = pd.DataFrame(results)
-    if not df_res.empty:
-        df_res = df_res.sort_values("turnover", ascending=False)
-        df_res['rank'] = range(1, len(df_res) + 1)
+    # 排序並返回 Top 100
+    if results:
+        df_results = pd.DataFrame(results)
+        df_results = df_results.sort_values("turnover", ascending=False)
+        df_results['rank'] = range(1, len(df_results) + 1)
         
-        top_100 = df_res.head(100)
+        top_100 = df_results.head(100)
         top_100_tickers = top_100['ticker'].tolist()
         
-        st.success(f"✅ 計算完成！已鎖定市場最熱門的 {len(top_100_tickers)} 檔標的。")
+        st.success(f"✅ 掃描完成！已鎖定市場最熱門的 {len(top_100_tickers)} 檔標的。")
         return top_100_tickers, top_100
     else:
-        st.error("市場數據掃描失敗，請稍後再試。")
+        st.error("❌ 市場數據掃描失敗，請稍後再試。")
         return [], pd.DataFrame()
 
 # ==================== 3. AI 預測核心 (改進版) ====================
@@ -515,7 +559,7 @@ def get_finnhub_sentiment(symbol):
 # ==================== 4. 主程式 UI ====================
 
 def main():
-    st.title("🏆 AI 股市全能專家 v15 (強化版)")
+    st.title("🏆 AI 股市全能專家 v15.1 (yfinance 專用版)")
     st.markdown("*即時數據 + 智能預測 + 雲端記錄*")
     
     client = get_gspread_client()
@@ -637,7 +681,7 @@ def main():
     # --- TAB 2: 全市場掃描 ---
     with tab2:
         st.markdown("### 🤖 全自動市場掃描流程")
-        st.write("1. 掃描 400+ 檔活躍股 → 2. 計算成交值排序 Top 100 → 3. AI 預測 → 4. 存入 **第二分頁**")
+        st.write("**步驟 1**: 選擇掃描模式 → **步驟 2**: 掃描交易值排行 → **步驟 3**: AI 預測 → **步驟 4**: 存入雲端")
         
         # 檢查市場時間
         taiwan_tz = 8
@@ -650,11 +694,52 @@ def main():
         else:
             st.warning("⚠️ 市場尚未收盤，實際收盤價與誤差將在收盤後更新")
         
-        if st.button("🚀 啟動掃描並預測", key="scan_market"):
-            top_100_tickers, _ = scan_top_100_by_value_local()
+        # 掃描模式選擇
+        st.markdown("---")
+        st.subheader("📊 步驟 1: 選擇掃描模式")
+        scan_mode = st.radio(
+            "掃描範圍",
+            ["精選模式 (200+ 檔活躍股，速度快)", "完整模式 (1700+ 檔全市場，速度慢)"],
+            help="精選模式約 5 分鐘，完整模式約 20-30 分鐘"
+        )
+        use_full = "完整" in scan_mode
+        
+        st.markdown("---")
+        st.subheader("📈 步驟 2: 掃描交易值排行")
+        
+        if st.button("🚀 啟動市場掃描", key="scan_market"):
+            top_100_tickers, turnover_df = scan_market_by_turnover(use_full_list=use_full)
             
             if top_100_tickers:
-                st.write(f"📋 掃描名單預覽：{top_100_tickers[:5]} ...")
+                # 儲存到 session_state
+                st.session_state.top_100_tickers = top_100_tickers
+                st.session_state.turnover_df = turnover_df
+                
+                st.success(f"✅ 成功掃描 Top 100 熱門股票！")
+                
+                # 顯示預覽
+                with st.expander("📋 查看 Top 100 交易值排行"):
+                    st.dataframe(
+                        turnover_df[['rank', 'ticker', 'name', 'price', 'volume', 'turnover']].rename(columns={
+                            'rank': '排名',
+                            'ticker': '代碼',
+                            'name': '名稱',
+                            'price': '收盤價',
+                            'volume': '成交量',
+                            'turnover': '成交值(億)'
+                        }),
+                        use_container_width=True
+                    )
+        
+        # 步驟 3: AI 預測
+        if 'top_100_tickers' in st.session_state:
+            st.markdown("---")
+            st.subheader("🤖 步驟 3: AI 智能預測")
+            
+            if st.button("🧠 開始 AI 預測分析", key="start_prediction"):
+                top_100_tickers = st.session_state.top_100_tickers
+                
+                st.write(f"📋 已選定 {len(top_100_tickers)} 檔股票進行 AI 預測...")
                 st.info("⏳ AI 預測中，已啟用速率限制保護...")
                 
                 results = []
@@ -722,17 +807,28 @@ def main():
                 status.empty()
                 progress.empty()
                 
+                # 儲存結果
+                st.session_state.prediction_results = results
+                
                 res_df = pd.DataFrame(results, columns=["日期","代碼","現價","預測","漲幅","實際","誤差"])
                 st.dataframe(res_df, use_container_width=True)
                 
                 if failed_count > 0:
                     st.warning(f"⚠️ {failed_count} 檔股票數據獲取失敗")
-                
+        
+        # 步驟 4: 存入雲端
+        if 'prediction_results' in st.session_state:
+            st.markdown("---")
+            st.subheader("💾 步驟 4: 存入雲端紀錄")
+            
+            if st.button("☁️ 存入 Google Sheets", key="save_predictions"):
+                results = st.session_state.prediction_results
                 if save_to_sheets(results, sheet_index=1):
                     st.success(f"🎉 成功將 {len(results)} 檔預測結果存入 **第二分頁**！")
         
         # 手動更新實際價格按鈕
         st.markdown("---")
+        st.subheader("🔄 更新實際收盤價")
         if st.button("🔄 更新實際收盤價與誤差", key="update_actual"):
             success, message = update_actual_prices(sheet_index=1)
             if success:
@@ -740,13 +836,21 @@ def main():
             else:
                 st.warning(f"⚠️ {message}")
 
-    # --- TAB 3: 交易值排行 (新增) ---
+    # --- TAB 3: 交易值排行 ---
     with tab3:
         st.markdown("### 💰 台股每日交易值 Top 100")
         st.info("此處數據將存入 Google Sheets 的 **第三分頁 (交易值排行)**")
         
+        # 掃描模式選擇
+        scan_mode_turnover = st.radio(
+            "掃描範圍",
+            ["精選模式 (200+ 檔，快速)", "完整模式 (1700+ 檔，完整)"],
+            key="turnover_mode"
+        )
+        use_full_turnover = "完整" in scan_mode_turnover
+        
         if st.button("📊 掃描今日交易值", key="scan_turnover"):
-            top_100_tickers, turnover_df = scan_top_100_by_value_local()
+            top_100_tickers, turnover_df = scan_market_by_turnover(use_full_list=use_full_turnover)
             
             if not turnover_df.empty:
                 # 顯示排行榜
