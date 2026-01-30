@@ -230,3 +230,32 @@ def main():
 
 if __name__ == "__main__":
     main()
+    # --- 把這段加在 main() 函數的最後面，或者直接取代 main 來測試 ---
+def debug_secrets():
+    st.subheader("🔍 Secrets 診斷室")
+    
+    # 檢查 1: Secrets 是否有載入任何東西？
+    if not st.secrets:
+        st.error("❌ 你的 Secrets 是空的！請確認有按下 Save changes。")
+        return
+
+    # 檢查 2: 是否有抓到 gcp_service_account 標題？
+    if "gcp_service_account" in st.secrets:
+        st.success("✅ 成功找到 [gcp_service_account] 標題！")
+        
+        # 檢查 3: 檢查關鍵欄位是否存在
+        keys = st.secrets["gcp_service_account"]
+        if "private_key" in keys and "client_email" in keys:
+             st.success("✅ 關鍵資料 (private_key, client_email) 都在！")
+             st.info("系統應該可以正常連線了，請重新整理頁面。")
+        else:
+             st.error("❌ 標題對了，但裡面缺東西。請檢查欄位拼字。")
+    else:
+        st.error("❌ 找不到 [gcp_service_account] 標題。")
+        st.warning(f"目前讀到的標題有：{list(st.secrets.keys())}")
+        st.info("💡 解決方法：請在 Secrets 最上面加上 [gcp_service_account]")
+
+# 在 if __name__ == "__main__": 裡面呼叫它
+if __name__ == "__main__":
+    # main()  <-- 先註解掉主程式
+    debug_secrets() # <-- 先跑這個診斷
