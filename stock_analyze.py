@@ -59,19 +59,18 @@ def get_stock_data(symbol, period="1y"):
 def get_gspread_client():
     scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
     
-    # 【關鍵修改】優先嘗試從 Streamlit Secrets 讀取 (這是 v8 版才有的功能)
+    # 【v8 關鍵功能】優先嘗試從 Streamlit Secrets 讀取
     if "gcp_service_account" in st.secrets:
         try:
             # 將 Secrets 轉換為標準字典
             creds_dict = dict(st.secrets["gcp_service_account"])
-            # 使用 from_json_keyfile_dict 讀取字典
             creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
             return gspread.authorize(creds)
         except Exception as e:
             st.error(f"Secrets 設定有誤: {e}")
             return None
 
-    # 【備用】嘗試從本地檔案讀取 (本機模式)
+    # 【備用】嘗試從本地檔案讀取
     elif os.path.exists(CREDENTIALS_JSON):
         try:
             creds = ServiceAccountCredentials.from_json_keyfile_name(CREDENTIALS_JSON, scope)
@@ -84,8 +83,7 @@ def get_gspread_client():
 def save_to_sheets(new_data):
     client = get_gspread_client()
     if client is None:
-        # 這裡的錯誤訊息跟舊版不一樣，這可以幫你確認是否更新成功
-        st.warning("⚠️ 無法連線至 Google Sheets。請在 Streamlit Secrets 設定 [gcp_service_account] 或在本地提供 credentials.json。")
+        st.warning("⚠️ 無法連線至 Google Sheets。請確認 Secrets 已儲存且程式碼已更新為 v8。")
         return False
         
     try:
@@ -127,7 +125,7 @@ def get_trained_base_model():
         X.append(scaled[i-60:i, 0])
         y.append(scaled[i, 0])
     
-    if len(X) == 0: # 防呆
+    if len(X) == 0: 
         X = np.zeros((10, 60, 1))
         y = np.zeros((10,))
 
@@ -214,8 +212,7 @@ def main():
             except Exception as e:
                 st.error(f"讀取失敗: {e}")
         else:
-            # 如果看到這行，代表 secrets 還是沒被讀到，但根據你的截圖，這機率很低
-            st.info("請在 Streamlit Secrets 設定憑證以啟用此功能。")
+            st.info("請確認 Secrets 設定正確，並按一下左側的「開始執行預測」來測試連線。")
 
 if __name__ == "__main__":
     main()
