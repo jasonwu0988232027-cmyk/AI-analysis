@@ -1,7 +1,19 @@
 import streamlit as st
+import importlib.metadata
 
 # --- 頁面配置 ---
-st.set_page_config(page_title="AI 股市預測專家 Pro v9 (現代架構版)", layout="wide")
+st.set_page_config(page_title="AI 股市預測專家 Pro v9.1 (版本檢測版)", layout="wide")
+
+# --- 檢測套件版本 (除錯用) ---
+try:
+    gspread_version = importlib.metadata.version("gspread")
+    auth_version = importlib.metadata.version("google-auth")
+    st.sidebar.success(f"📦 套件狀態：gspread v{gspread_version} | google-auth v{auth_version}")
+    
+    if gspread_version.startswith("5") or gspread_version.startswith("4"):
+        st.error("🚨 警告：你的 gspread 版本太舊！請更新 requirements.txt 並重啟 App。")
+except:
+    st.sidebar.warning("無法檢測套件版本")
 
 import yfinance as yf
 import pandas as pd
@@ -19,11 +31,11 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # 載入必要庫 (改用 google-auth)
 try:
     import gspread
-    from google.oauth2.service_account import Credentials # <--- 這是新的關鍵套件
+    from google.oauth2.service_account import Credentials
     import tensorflow as tf
     from sklearn.preprocessing import MinMaxScaler
 except ImportError:
-    st.error("缺少套件，請更新 requirements.txt：pip install gspread google-auth tensorflow scikit-learn")
+    st.error("缺少套件，請更新 requirements.txt")
 
 # --- 全局設定 ---
 CREDENTIALS_JSON = "credentials.json" 
@@ -33,7 +45,6 @@ BATCH_CD = 0.5
 # ==================== 1. 穩定版百大名單 (內建) ====================
 
 def get_stable_stock_list():
-    """內建熱門台股名單"""
     tickers = [
         '2330.TW', '2317.TW', '2454.TW', '2308.TW', '2382.TW', '2303.TW', '2881.TW', '2882.TW', 
         '2891.TW', '2886.TW', '2412.TW', '2884.TW', '1216.TW', '2885.TW', '3711.TW', '2892.TW', 
@@ -45,7 +56,6 @@ def get_stable_stock_list():
     return df
 
 def get_stock_data(symbol, period="1y"):
-    """獲取單股歷史數據"""
     try:
         stock = yf.Ticker(symbol)
         df = stock.history(period=period)
@@ -54,27 +64,25 @@ def get_stock_data(symbol, period="1y"):
     except:
         return None
 
-# ==================== 2. 雲端同步模組 (改用 google-auth) ====================
+# ==================== 2. 雲端同步模組 (v9 google-auth) ====================
 
 def get_gspread_client():
-    # 定義權限範圍
     scopes = [
         'https://www.googleapis.com/auth/spreadsheets',
         'https://www.googleapis.com/auth/drive'
     ]
     
-    # 方式 A: 從 Streamlit Secrets 讀取 (優先)
+    # 方式 A: Streamlit Secrets (優先)
     if "gcp_service_account" in st.secrets:
         try:
             creds_dict = dict(st.secrets["gcp_service_account"])
-            # 使用 google-auth 的新方法
             creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
             return gspread.authorize(creds)
         except Exception as e:
             st.error(f"Secrets 設定有誤: {e}")
             return None
 
-    # 方式 B: 從本地檔案讀取
+    # 方式 B: 本地檔案
     elif os.path.exists(CREDENTIALS_JSON):
         try:
             creds = Credentials.from_service_account_file(CREDENTIALS_JSON, scopes=scopes)
@@ -87,23 +95,21 @@ def get_gspread_client():
 def save_to_sheets(new_data):
     client = get_gspread_client()
     if client is None:
-        st.warning("⚠️ 無法連線至 Google Sheets。請檢查 Secrets 設定。")
+        st.warning("⚠️ 無法連線至 Google Sheets。請檢查 Secrets。")
         return False
         
     try:
         sh = client.open(SHEET_NAME)
         ws = sh.sheet1
-        # 如果是新表，寫入標題
         if ws.row_count <= 1 and (not ws.cell(1, 1).value):
             ws.append_row(["預測日期", "股票代碼", "目前價格", "7日預測價", "預期漲幅", "實際收盤價", "誤差%"])
             
-        # 寫入數據
         ws.append_rows(new_data)
         st.success(f"✅ 成功寫入 {len(new_data)} 筆資料至雲端！")
         return True
     except Exception as e:
-        # 這裡會捕捉真正的錯誤
-        st.error(f"❌ 雲端寫入失敗: {e}")
+        # 如果還是報錯，印出詳細類型
+        st.error(f"❌ 雲端寫入失敗: {type(e).__name__} - {e}")
         return False
 
 # ==================== 3. 機器學習推論模組 ====================
@@ -159,7 +165,7 @@ def fast_predict(model, df):
 # ==================== 4. 主介面 ====================
 
 def main():
-    st.title("📈 AI 股市預測專家 Pro v9 (現代架構版)")
+    st.title("📈 AI 股市預測專家 Pro v9.1 (版本檢測版)")
     
     tab1, tab2 = st.tabs(["🚀 智能批次預測", "🧐 歷史反思"])
 
