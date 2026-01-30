@@ -2,16 +2,13 @@ import streamlit as st
 import importlib.metadata
 
 # --- 頁面配置 ---
-st.set_page_config(page_title="AI 股市預測專家 Pro v9.1 (版本檢測版)", layout="wide")
+st.set_page_config(page_title="AI 股市預測專家 Pro v9.2 (最終容錯版)", layout="wide")
 
-# --- 檢測套件版本 (除錯用) ---
+# --- 檢測套件版本 ---
 try:
     gspread_version = importlib.metadata.version("gspread")
     auth_version = importlib.metadata.version("google-auth")
     st.sidebar.success(f"📦 套件狀態：gspread v{gspread_version} | google-auth v{auth_version}")
-    
-    if gspread_version.startswith("5") or gspread_version.startswith("4"):
-        st.error("🚨 警告：你的 gspread 版本太舊！請更新 requirements.txt 並重啟 App。")
 except:
     st.sidebar.warning("無法檢測套件版本")
 
@@ -28,7 +25,7 @@ import urllib3
 # 停用 SSL 警告
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# 載入必要庫 (改用 google-auth)
+# 載入必要庫
 try:
     import gspread
     from google.oauth2.service_account import Credentials
@@ -64,7 +61,7 @@ def get_stock_data(symbol, period="1y"):
     except:
         return None
 
-# ==================== 2. 雲端同步模組 (v9 google-auth) ====================
+# ==================== 2. 雲端同步模組 ====================
 
 def get_gspread_client():
     scopes = [
@@ -72,7 +69,6 @@ def get_gspread_client():
         'https://www.googleapis.com/auth/drive'
     ]
     
-    # 方式 A: Streamlit Secrets (優先)
     if "gcp_service_account" in st.secrets:
         try:
             creds_dict = dict(st.secrets["gcp_service_account"])
@@ -81,35 +77,35 @@ def get_gspread_client():
         except Exception as e:
             st.error(f"Secrets 設定有誤: {e}")
             return None
-
-    # 方式 B: 本地檔案
     elif os.path.exists(CREDENTIALS_JSON):
         try:
             creds = Credentials.from_service_account_file(CREDENTIALS_JSON, scopes=scopes)
             return gspread.authorize(creds)
         except Exception:
             return None
-            
     return None
 
 def save_to_sheets(new_data):
     client = get_gspread_client()
     if client is None:
-        st.warning("⚠️ 無法連線至 Google Sheets。請檢查 Secrets。")
+        st.warning("⚠️ 無法連線至 Google Sheets。")
         return False
         
     try:
         sh = client.open(SHEET_NAME)
         ws = sh.sheet1
-        if ws.row_count <= 1 and (not ws.cell(1, 1).value):
-            ws.append_row(["預測日期", "股票代碼", "目前價格", "7日預測價", "預期漲幅", "實際收盤價", "誤差%"])
-            
+        
+        # 檢查是否需要寫入標題 (如果 A1 格子是空的)
+        if ws.row_count > 0:
+            val = ws.acell('A1').value
+            if not val:
+                 ws.append_row(["預測日期", "股票代碼", "目前價格", "7日預測價", "預期漲幅", "實際收盤價", "誤差%"])
+        
         ws.append_rows(new_data)
         st.success(f"✅ 成功寫入 {len(new_data)} 筆資料至雲端！")
         return True
     except Exception as e:
-        # 如果還是報錯，印出詳細類型
-        st.error(f"❌ 雲端寫入失敗: {type(e).__name__} - {e}")
+        st.error(f"❌ 雲端寫入失敗: {e}")
         return False
 
 # ==================== 3. 機器學習推論模組 ====================
@@ -165,7 +161,7 @@ def fast_predict(model, df):
 # ==================== 4. 主介面 ====================
 
 def main():
-    st.title("📈 AI 股市預測專家 Pro v9.1 (版本檢測版)")
+    st.title("📈 AI 股市預測專家 Pro v9.2 (最終容錯版)")
     
     tab1, tab2 = st.tabs(["🚀 智能批次預測", "🧐 歷史反思"])
 
@@ -218,10 +214,22 @@ def main():
         if client:
             try:
                 ws = client.open(SHEET_NAME).sheet1
-                records = ws.get_all_records()
-                st.dataframe(pd.DataFrame(records).tail(20) if records else "暫無紀錄")
+                # --- 關鍵修改：使用 get_all_values() 取代 get_all_records() ---
+                # 這能避免「標題重複」或「空白欄位」導致的錯誤
+                raw_data = ws.get_all_values()
+                
+                if len(raw_data) > 1:
+                    headers = raw_data[0]
+                    rows = raw_data[1:]
+                    # 自動處理重複標題，避免 pandas 報錯
+                    df = pd.DataFrame(rows, columns=headers)
+                    st.dataframe(df.tail(20))
+                else:
+                    st.info("雲端目前暫無紀錄，請先執行預測。")
+                    
             except Exception as e:
                 st.error(f"讀取失敗: {e}")
+                st.info("💡 建議：請嘗試清空 Google Sheet 內容後重試。")
         else:
             st.info("請確認 Secrets 設定。")
 
