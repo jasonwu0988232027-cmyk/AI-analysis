@@ -1,7 +1,7 @@
 import streamlit as st
 
 # --- 頁面配置 ---
-st.set_page_config(page_title="AI 股市預測專家 Pro v5 (備援版)", layout="wide")
+st.set_page_config(page_title="AI 股市預測專家 Pro v6 (穩定版)", layout="wide")
 
 import yfinance as yf
 import pandas as pd
@@ -28,88 +28,28 @@ except ImportError:
 # --- 全局設定 ---
 CREDENTIALS_JSON = "credentials.json" 
 SHEET_NAME = "Stock_Predictions_History" 
-BATCH_CD = 1.2 
+BATCH_CD = 1.0 # 稍微加快速度
 
-# ==================== 1. 備援名單 (當證交所 API 掛掉時使用) ====================
+# ==================== 1. 穩定版百大名單 (不依賴證交所 API) ====================
 
-def get_fallback_stocks():
-    """提供台灣 30 大權值股作為備用名單"""
-    st.warning("⚠️ 檢測到證交所 API 連線困難，已自動切換至「備援權值股名單」繼續執行。")
-    data = {
-        '證券代號': [
-            '2330.TW', '2317.TW', '2454.TW', '2308.TW', '2382.TW', 
-            '2303.TW', '2881.TW', '2882.TW', '2891.TW', '2886.TW',
-            '2412.TW', '2884.TW', '1216.TW', '2885.TW', '3711.TW',
-            '2892.TW', '2357.TW', '2880.TW', '2890.TW', '5880.TW',
-            '2345.TW', '3008.TW', '2327.TW', '2395.TW', '2883.TW',
-            '2887.TW', '3045.TW', '4938.TW', '2408.TW', '1101.TW'
-        ],
-        '證券名稱': [
-            '台積電', '鴻海', '聯發科', '台達電', '廣達', 
-            '聯電', '富邦金', '國泰金', '中信金', '兆豐金',
-            '中華電', '玉山金', '統一', '元大金', '日月光',
-            '第一金', '華碩', '華南金', '永豐金', '合庫金',
-            '智邦', '大立光', '國巨', '研華', '開發金',
-            '台新金', '台灣大', '和碩', '南亞科', '台泥'
-        ]
-    }
-    # 嘗試抓取現價填入
-    df = pd.DataFrame(data)
-    current_prices = []
-    for symbol in df['證券代號']:
-        try:
-            stock = yf.Ticker(symbol)
-            hist = stock.history(period="1d")
-            if not hist.empty:
-                current_prices.append(hist['Close'].iloc[-1])
-            else:
-                current_prices.append(0)
-        except:
-            current_prices.append(0)
-    df['收盤價'] = current_prices
-    return df
-
-# ==================== 2. 數據獲取 (含自動備援) ====================
-
-def get_top_100_value_stocks():
-    """嘗試抓取證交所數據，失敗則調用備援名單"""
-    now = datetime.now()
-    if now.hour < 15:
-        target_date = now - timedelta(days=1)
-    else:
-        target_date = now
-
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+def get_stable_stock_list():
+    """直接回傳內建的熱門台股名單，保證不缺資料"""
+    # 這是台灣 50 + 熱門電子/金融/傳產股的綜合名單
+    tickers = [
+        '2330.TW', '2317.TW', '2454.TW', '2308.TW', '2382.TW', '2303.TW', '2881.TW', '2882.TW', '2891.TW', '2886.TW',
+        '2412.TW', '2884.TW', '1216.TW', '2885.TW', '3711.TW', '2892.TW', '2357.TW', '2880.TW', '2890.TW', '5880.TW',
+        '2345.TW', '3008.TW', '2327.TW', '2395.TW', '2883.TW', '2887.TW', '3045.TW', '4938.TW', '2408.TW', '1101.TW',
+        '2002.TW', '3037.TW', '2379.TW', '3034.TW', '2603.TW', '2609.TW', '2615.TW', '3231.TW', '2356.TW', '2301.TW',
+        '2801.TW', '2888.TW', '6669.TW', '6415.TW', '3035.TW', '3017.TW', '4904.TW', '5871.TW', '2912.TW', '9910.TW',
+        '1301.TW', '1303.TW', '1326.TW', '6505.TW', '2353.TW', '2409.TW', '3481.TW', '6770.TW', '1513.TW', '1519.TW',
+        '1605.TW', '2371.TW', '2383.TW', '2388.TW', '2451.TW', '2474.TW', '3019.TW', '3042.TW', '3044.TW', '3189.TW',
+        '3293.TW', '3529.TW', '3532.TW', '3533.TW', '3653.TW', '3661.TW', '3702.TW', '4919.TW', '4958.TW', '4961.TW'
+    ]
     
-    attempts = 0
-    # 搜尋最近 7 天
-    while attempts < 7:
-        date_str = target_date.strftime('%Y%m%d')
-        url = f"https://www.twse.com.tw/exchangeReport/MI_INDEX?response=json&date={date_str}&type=ALLBUT0999"
-        
-        try:
-            # 降低 timeout 防止卡死
-            res = requests.get(url, headers=headers, timeout=5, verify=False)
-            data = res.json()
-            
-            target_key = 'data9' if 'data9' in data else 'data8'
-            
-            if data.get('stat') == "OK" and target_key in data:
-                fields_key = 'fields9' if 'fields9' in data else 'fields8'
-                df = pd.DataFrame(data[target_key], columns=data[fields_key])
-                df['成交金額'] = df['成交金額'].str.replace(',', '').astype(float)
-                df['證券代號'] = df['證券代號'] + ".TW"
-                st.success(f"📅 成功連線證交所 (資料日期: {target_date.strftime('%Y-%m-%d')})")
-                return df.nlargest(100, '成交金額')[['證券代號', '證券名稱', '收盤價']]
-            
-        except Exception:
-            pass 
-        
-        target_date -= timedelta(days=1)
-        attempts += 1
-
-    # 如果跑完迴圈還是沒資料，回傳備用名單
-    return get_fallback_stocks()
+    # 建立 DataFrame 結構
+    data = {'證券代號': tickers, '證券名稱': [f"股票 {t}" for t in tickers]} 
+    df = pd.DataFrame(data)
+    return df
 
 def get_stock_data(symbol, period="1y"):
     """獲取單股歷史數據"""
@@ -121,11 +61,11 @@ def get_stock_data(symbol, period="1y"):
     except:
         return None
 
-# ==================== 3. 雲端與模型模組 ====================
+# ==================== 2. 雲端同步模組 (容錯版) ====================
 
 def get_gspread_client():
     if not os.path.exists(CREDENTIALS_JSON):
-        st.warning(f"⚠️ 未找到 {CREDENTIALS_JSON}，請上傳憑證。")
+        # 這裡不報錯，改用回傳 None，讓程式知道沒鑰匙就好
         return None
     try:
         scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
@@ -137,17 +77,23 @@ def get_gspread_client():
 
 def save_to_sheets(new_data):
     client = get_gspread_client()
-    if client:
-        try:
-            sh = client.open(SHEET_NAME)
-            ws = sh.sheet1
-            if ws.row_count <= 1 and (not ws.cell(1, 1).value):
-                ws.append_row(["預測日期", "股票代碼", "目前價格", "7日預測價", "預期漲幅", "實際收盤價", "誤差%"])
-            ws.append_rows(new_data)
-            return True
-        except Exception as e:
-            st.error(f"❌ 雲端寫入失敗: {e}")
-    return False
+    if client is None:
+        st.warning("⚠️ 未偵測到憑證 (credentials.json)，本次預測結果將**不會**上傳至雲端，僅顯示於下方。")
+        return False
+        
+    try:
+        sh = client.open(SHEET_NAME)
+        ws = sh.sheet1
+        if ws.row_count <= 1 and (not ws.cell(1, 1).value):
+            ws.append_row(["預測日期", "股票代碼", "目前價格", "7日預測價", "預期漲幅", "實際收盤價", "誤差%"])
+        ws.append_rows(new_data)
+        st.success("✅ 雲端存檔成功！")
+        return True
+    except Exception as e:
+        st.error(f"❌ 雲端寫入失敗: {e}")
+        return False
+
+# ==================== 3. 機器學習推論模組 ====================
 
 @st.cache_resource
 def get_trained_base_model():
@@ -184,15 +130,17 @@ def fast_predict(model, df):
 # ==================== 4. 主介面 ====================
 
 def main():
-    st.title("📈 AI 股市趨勢分析 Pro (防崩潰版)")
+    st.title("📈 AI 股市趨勢分析 Pro (v6 穩定版)")
     
-    tab1, tab2 = st.tabs(["🚀 自動預測執行", "🧐 歷史反思"])
+    tab1, tab2 = st.tabs(["🚀 熱門股批量預測", "🧐 歷史反思"])
 
     with tab1:
-        st.write("系統將優先抓取證交所即時百大排名，若連線失敗將自動切換至權值股名單。")
-        if st.button("開始執行"):
-            with st.spinner("系統初始化中..."):
-                target_stocks = get_top_100_value_stocks()
+        st.info("系統採用「內建熱門股名單 (80+)」，不再受證交所連線限制，保證執行順暢。")
+        
+        if st.button("開始執行預測"):
+            with st.spinner("模型初始化中..."):
+                # 直接使用穩定名單，不再去證交所冒險
+                target_stocks = get_stable_stock_list()
                 model = get_trained_base_model()
             
             if not target_stocks.empty and model:
@@ -203,9 +151,10 @@ def main():
                 total = len(target_stocks)
                 for i, row in target_stocks.iterrows():
                     symbol = row['證券代號']
-                    msg.text(f"分析進度 ({i+1}/{total}): {symbol}")
+                    msg.text(f"正在運算 ({i+1}/{total}): {symbol}")
                     
-                    time.sleep(BATCH_CD)
+                    # 速度稍微加快，因為內建名單很穩
+                    time.sleep(0.5) 
                     df = get_stock_data(symbol)
                     
                     if df is not None and len(df) >= 60:
@@ -223,9 +172,12 @@ def main():
                         ])
                     bar.progress((i+1)/total)
                 
-                if save_to_sheets(results):
-                    st.success(f"🎉 已完成 {len(results)} 檔股票預測並存檔！")
-                    st.dataframe(pd.DataFrame(results, columns=["日期","代碼","現價","預測價","漲幅","實際","誤差"]))
+                # 顯示結果 DataFrame
+                res_df = pd.DataFrame(results, columns=["日期","代碼","現價","預測價","漲幅","實際","誤差"])
+                st.dataframe(res_df)
+                
+                # 嘗試存檔 (如果沒鑰匙，會自動跳過並顯示警告，不會報錯)
+                save_to_sheets(results)
 
     with tab2:
         st.subheader("Google Sheets 歷史紀錄")
@@ -240,6 +192,8 @@ def main():
                     st.info("暫無紀錄")
             except Exception as e:
                 st.error(f"讀取失敗: {e}")
+        else:
+            st.info("請上傳 credentials.json 以啟用歷史回測功能。")
 
 if __name__ == "__main__":
     main()
