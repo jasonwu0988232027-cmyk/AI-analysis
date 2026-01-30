@@ -274,22 +274,42 @@ def get_batch_realtime_data(symbols, batch_size=10, cooldown_per_batch=2.0, cool
 def get_full_market_tickers():
     """
     從證交所官網獲取完整股票清單
+    支援多種解析方式，自動降級處理
     """
     url = "https://isin.twse.com.tw/isin/C_public.jsp?strMode=2"
+    
+    # 方法 1: 使用 lxml 解析器
     try:
         res = requests.get(url, timeout=10, verify=False, headers={'User-Agent': 'Mozilla/5.0'})
         res.encoding = 'big5'
-        df = pd.read_html(res.text)[0]
+        
+        # 嘗試使用 lxml
+        try:
+            df = pd.read_html(res.text, flavor='lxml')[0]
+        except:
+            # 降級使用 html5lib
+            try:
+                df = pd.read_html(res.text, flavor='html5lib')[0]
+            except:
+                # 最後使用 bs4
+                df = pd.read_html(res.text, flavor='bs4')[0]
+        
         df.columns = df.iloc[0]
         df = df[df['有價證券代號及名稱'].str.contains("  ", na=False)]
-        tickers = [f"{t.split('  ')[0].strip()}.TW" for t in df['有價證券代號及名稱'] if len(t.split('  ')[0].strip()) == 4]
+        tickers = [f"{t.split('  ')[0].strip()}.TW" for t in df['有價證券代號及名稱'] 
+                  if len(t.split('  ')[0].strip()) == 4 and t.split('  ')[0].strip().isdigit()]
+        
         if len(tickers) > 800:
             st.success(f"✅ 成功從證交所獲取 {len(tickers)} 檔股票清單")
             return tickers
+    except ImportError as e:
+        st.error(f"❌ 缺少必要套件: {e}")
+        st.info("💡 請執行: pip install lxml html5lib beautifulsoup4")
     except Exception as e:
-        st.warning(f"⚠️ 證交所連線失敗: {e}，使用備用清單")
+        st.warning(f"⚠️ 證交所連線失敗: {e}")
     
-    # 備用清單
+    # 降級使用備用清單
+    st.info("📋 使用內建精選股票清單")
     return get_market_universe()
 
 def get_market_universe():
