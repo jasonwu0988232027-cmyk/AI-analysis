@@ -46,6 +46,15 @@ CREDENTIALS_JSON = "credentials.json"
 SHEET_NAME = "Stock_Predictions_History"
 FINNHUB_API_KEY = "d5t2rvhr01qt62ngu1kgd5t2rvhr01qt62ngu1l0"  # 請使用您自己的 API Key
 
+# --- API 速率限制設定（防止被封鎖）---
+API_RATE_LIMIT = {
+    'stock_cooldown': 0.5,        # 每支股票查詢間隔（秒）
+    'batch_size': 10,              # 每批次股票數量
+    'batch_cooldown': 2.0,         # 每批次之間間隔（秒）
+    'max_retries': 3,              # 失敗重試次數
+    'retry_delay': 5.0             # 重試間隔（秒）
+}
+
 # ==================== 0. 雲端連線模組 (支援多重分頁) ====================
 
 def get_gspread_client():
@@ -192,14 +201,18 @@ def update_actual_prices(sheet_index=1):
 
 # ==================== 1. 改進的數據獲取 (使用即時數據) ====================
 
-def get_realtime_stock_data(symbol, use_fallback=True):
+def get_realtime_stock_data(symbol, cooldown=0.5):
     """
-    優先使用即時數據，失敗則使用歷史數據
+    僅使用 yfinance 的即時報價 API
+    cooldown: 每次調用後的冷卻時間（秒），防止被封鎖
     """
     try:
-        # 方法 1: 使用 yfinance 的即時報價
+        # 使用 yfinance 的即時報價
         ticker = yf.Ticker(symbol)
         info = ticker.info
+        
+        # 冷卻時間，避免請求過快
+        time.sleep(cooldown)
         
         if 'regularMarketPrice' in info and info['regularMarketPrice']:
             current_price = info['regularMarketPrice']
@@ -207,26 +220,53 @@ def get_realtime_stock_data(symbol, use_fallback=True):
             return {
                 'price': current_price,
                 'volume': volume,
-                'source': 'realtime'
+                'source': 'realtime',
+                'success': True
             }
-    except:
-        pass
+        else:
+            return {
+                'price': None,
+                'volume': None,
+                'source': 'realtime',
+                'success': False,
+                'error': 'No market price available'
+            }
+    except Exception as e:
+        return {
+            'price': None,
+            'volume': None,
+            'source': 'realtime',
+            'success': False,
+            'error': str(e)
+        }
+
+def get_batch_realtime_data(symbols, batch_size=10, cooldown_per_batch=2.0, cooldown_per_stock=0.5):
+    """
+    批次獲取即時股價，包含更強的防封鎖機制
     
-    if use_fallback:
-        # 方法 2: 備用方案 - 使用最近的歷史數據
-        try:
-            df = yf.download(symbol, period="2d", progress=False)
-            if not df.empty:
-                df.columns = [col[0] if isinstance(col, tuple) else col for col in df.columns]
-                return {
-                    'price': float(df['Close'].iloc[-1]),
-                    'volume': float(df['Volume'].iloc[-1]),
-                    'source': 'historical'
-                }
-        except:
-            pass
+    參數:
+    - symbols: 股票代碼列表
+    - batch_size: 每批次處理的股票數量
+    - cooldown_per_batch: 每批次之間的冷卻時間（秒）
+    - cooldown_per_stock: 每支股票之間的冷卻時間（秒）
     
-    return None
+    返回: dict {symbol: data}
+    """
+    results = {}
+    total = len(symbols)
+    
+    for i in range(0, total, batch_size):
+        batch = symbols[i:i + batch_size]
+        
+        for symbol in batch:
+            data = get_realtime_stock_data(symbol, cooldown=cooldown_per_stock)
+            results[symbol] = data
+        
+        # 批次之間額外冷卻
+        if i + batch_size < total:
+            time.sleep(cooldown_per_batch)
+    
+    return results
 
 # ==================== 2. 本地運算市場掃描引擎 ====================
 
@@ -263,62 +303,61 @@ def get_market_universe():
 def scan_top_100_by_value_local():
     """
     掃描市場並計算成交值排行
+    使用即時報價 + 強化防封鎖機制
     返回: (top_100_tickers, turnover_data)
     """
     tickers = get_market_universe()
     st.info(f"🔍 載入全市場觀察名單 (共 {len(tickers)} 檔)，開始計算成交重心...")
+    st.warning("⏳ 為防止 API 封鎖，已啟用智能限速機制，預計需要 5-10 分鐘...")
     
-    batch_size = 50
     results = []
     
     progress = st.progress(0)
     status = st.empty()
     
+    # 使用批次處理，每批 10 檔，批次間休息 2 秒
+    batch_size = 10
+    cooldown_per_stock = 0.5  # 每支股票間隔 0.5 秒
+    cooldown_per_batch = 2.0  # 每批次間隔 2 秒
+    
     for i in range(0, len(tickers), batch_size):
         batch = tickers[i : i + batch_size]
-        status.text(f"正在掃描市場數據：第 {i} ~ {i+len(batch)} 檔...")
+        status.text(f"正在掃描市場數據：第 {i+1} ~ {min(i+batch_size, len(tickers))} 檔... (智能限速中)")
         
-        try:
-            data = yf.download(batch, period="2d", group_by='ticker', threads=True, progress=False)
-            
-            for t in batch:
-                try:
-                    if isinstance(data.columns, pd.MultiIndex):
-                        if t in data.columns.levels[0]:
-                            t_df = data[t].dropna()
-                        else:
-                            continue
-                    else:
-                        t_df = data.dropna()
+        for stock in batch:
+            try:
+                # 使用即時報價 API
+                data = get_realtime_stock_data(stock, cooldown=cooldown_per_stock)
+                
+                if data['success'] and data['price']:
+                    price = data['price']
+                    volume = data['volume']
+                    turnover = (price * volume) / 1e8
                     
-                    if not t_df.empty:
-                        last_row = t_df.iloc[-1]
-                        price = float(last_row['Close'])
-                        volume = float(last_row['Volume'])
-                        turnover = (price * volume) / 1e8
-                        
-                        # 獲取股票名稱
-                        try:
-                            ticker_obj = yf.Ticker(t)
-                            name = ticker_obj.info.get('longName', t.split('.')[0])
-                        except:
-                            name = t.split('.')[0]
-                        
-                        results.append({
-                            "ticker": t,
-                            "name": name,
-                            "price": price,
-                            "volume": volume,
-                            "turnover": turnover
-                        })
-                except:
-                    continue
-        except:
-            pass
+                    # 獲取股票名稱
+                    try:
+                        ticker_obj = yf.Ticker(stock)
+                        name = ticker_obj.info.get('longName', stock.split('.')[0])
+                    except:
+                        name = stock.split('.')[0]
+                    
+                    results.append({
+                        "ticker": stock,
+                        "name": name,
+                        "price": price,
+                        "volume": volume,
+                        "turnover": turnover
+                    })
+            except Exception as e:
+                # 失敗時記錄但繼續
+                pass
+        
+        # 批次間額外休息
+        if i + batch_size < len(tickers):
+            time.sleep(cooldown_per_batch)
         
         progress.progress(min((i + batch_size) / len(tickers), 1.0))
-        time.sleep(0.5)
-        
+    
     status.empty()
     progress.empty()
     
@@ -616,13 +655,20 @@ def main():
             
             if top_100_tickers:
                 st.write(f"📋 掃描名單預覽：{top_100_tickers[:5]} ...")
+                st.info("⏳ AI 預測中，已啟用速率限制保護...")
                 
                 results = []
                 progress = st.progress(0)
                 status = st.empty()
                 
+                failed_count = 0
+                
                 for i, stock in enumerate(top_100_tickers):
                     status.text(f"🤖 AI 正在分析 ({i+1}/{len(top_100_tickers)}): {stock}")
+                    
+                    # 每10支股票休息一下
+                    if i > 0 and i % 10 == 0:
+                        time.sleep(API_RATE_LIMIT['batch_cooldown'])
                     
                     df = get_stock_history(stock)
                     if df is not None:
@@ -653,6 +699,7 @@ def main():
                                 if not actual_df.empty:
                                     actual_price = round(float(actual_df['Close'].iloc[0]), 2)
                                     error_pct = f"{((actual_price - pred_p) / pred_p * 100):.2f}%"
+                                time.sleep(API_RATE_LIMIT['stock_cooldown'])  # 冷卻
                             except:
                                 pass
                         
@@ -665,7 +712,11 @@ def main():
                             actual_price,
                             error_pct
                         ])
+                    else:
+                        failed_count += 1
                     
+                    # 每支股票之間的基本冷卻
+                    time.sleep(API_RATE_LIMIT['stock_cooldown'])
                     progress.progress((i+1)/len(top_100_tickers))
                 
                 status.empty()
@@ -673,6 +724,9 @@ def main():
                 
                 res_df = pd.DataFrame(results, columns=["日期","代碼","現價","預測","漲幅","實際","誤差"])
                 st.dataframe(res_df, use_container_width=True)
+                
+                if failed_count > 0:
+                    st.warning(f"⚠️ {failed_count} 檔股票數據獲取失敗")
                 
                 if save_to_sheets(results, sheet_index=1):
                     st.success(f"🎉 成功將 {len(results)} 檔預測結果存入 **第二分頁**！")
