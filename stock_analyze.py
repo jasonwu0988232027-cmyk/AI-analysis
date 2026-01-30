@@ -1,10 +1,10 @@
 import streamlit as st
 import importlib.metadata
 
-# --- 頁面配置（必須在最前面）---
-st.set_page_config(page_title="AI 股市全能專家 v10.1 (穩健版)", layout="wide", initial_sidebar_state="expanded")
+# --- 頁面配置 ---
+st.set_page_config(page_title="AI 股市全能專家 v11 (全市場掃描版)", layout="wide", initial_sidebar_state="expanded")
 
-# --- 檢測套件版本 ---
+# --- 檢測套件 ---
 try:
     gspread_version = importlib.metadata.version("gspread")
     auth_version = importlib.metadata.version("google-auth")
@@ -20,6 +20,7 @@ from datetime import datetime, timedelta
 import time
 import os
 import urllib3
+import random
 
 # 停用 SSL 警告
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -29,23 +30,13 @@ try:
     import gspread
     from google.oauth2.service_account import Credentials
     import tensorflow as tf
-    from tensorflow import keras
     from tensorflow.keras.models import Sequential
-    from tensorflow.keras.layers import LSTM, Dense, Dropout, Input
+    from tensorflow.keras.layers import LSTM, Dense, Input
     from sklearn.preprocessing import MinMaxScaler
-    from sklearn.metrics import mean_absolute_error
     TF_AVAILABLE = True
-    SKLEARN_AVAILABLE = True
 except ImportError:
     TF_AVAILABLE = False
-    SKLEARN_AVAILABLE = False
-    st.error("部分 AI 或雲端套件缺失，功能可能受限。")
-
-try:
-    import ta
-    TA_AVAILABLE = True
-except ImportError:
-    TA_AVAILABLE = False
+    st.error("缺少 AI 套件，請檢查 requirements.txt")
 
 import warnings
 warnings.filterwarnings('ignore')
@@ -54,7 +45,6 @@ warnings.filterwarnings('ignore')
 FINNHUB_API_KEY = "d5t2rvhr01qt62ngu1kgd5t2rvhr01qt62ngu1l0"
 CREDENTIALS_JSON = "credentials.json" 
 SHEET_NAME = "Stock_Predictions_History"
-LOOKBACK_DAYS = 60
 
 # ==================== 0. 雲端連線模組 ====================
 
@@ -84,7 +74,6 @@ def save_to_sheets(new_data):
     try:
         sh = client.open(SHEET_NAME)
         ws = sh.sheet1
-        # 檢查 A1 是否有值，避免標題重複
         if ws.row_count > 0:
             val = ws.acell('A1').value
             if not val:
@@ -95,93 +84,98 @@ def save_to_sheets(new_data):
         st.error(f"❌ 雲端寫入失敗: {e}")
         return False
 
-# ==================== 1. 數據獲取 ====================
+# ==================== 1. 全市場掃描選股邏輯 (來自您的檔案) ====================
+
+@st.cache_data(ttl=86400) # 每天只抓一次股票清單
+def get_full_market_tickers():
+    """從證交所 ISIN 抓取所有上市股票代碼"""
+    url = "https://isin.twse.com.tw/isin/C_public.jsp?strMode=2"
+    try:
+        res = requests.get(url, timeout=10, verify=False, headers={'User-Agent': 'Mozilla/5.0'})
+        res.encoding = 'big5'
+        df = pd.read_html(res.text)[0]
+        df.columns = df.iloc[0]
+        # 篩選出股票代號 (去除權證等雜訊)
+        df = df[df['有價證券代號及名稱'].str.contains("  ", na=False)]
+        tickers = [f"{t.split('  ')[0].strip()}.TW" for t in df['有價證券代號及名稱'] if len(t.split('  ')[0].strip()) == 4]
+        return tickers
+    except Exception as e:
+        st.error(f"無法抓取股票清單: {e}")
+        # 如果失敗，回傳預設清單以防崩潰
+        return ['2330.TW', '2317.TW', '2454.TW']
+
+def scan_top_100_by_value():
+    """掃描全市場，計算成交值(價格*成交量)，回傳前100名"""
+    all_tickers = get_full_market_tickers()
+    
+    st.info(f"🔍 已獲取全市場 {len(all_tickers)} 檔股票，開始計算成交值排行...(這可能需要幾分鐘)")
+    
+    res_rank = []
+    batch_size = 50 # 批次處理以加快速度
+    
+    # 進度條
+    p_bar = st.progress(0)
+    status_text = st.empty()
+    
+    # 為了避免太久，我們先掃描前 800 檔 (通常熱門股代號較前)
+    # 若要全掃描可拿掉 [:800]
+    scan_list = all_tickers[:800] 
+    
+    for i in range(0, len(scan_list), batch_size):
+        batch = scan_list[i : i + batch_size]
+        status_text.text(f"正在掃描第 {i} ~ {i+batch_size} 檔...")
+        
+        try:
+            # 批量下載數據
+            data = yf.download(batch, period="2d", group_by='ticker', threads=True, progress=False)
+            
+            for t in batch:
+                try:
+                    # 處理多層索引
+                    t_df = data[t] if isinstance(data.columns, pd.MultiIndex) else data
+                    t_df = t_df.dropna()
+                    
+                    if not t_df.empty:
+                        last = t_df.iloc[-1]
+                        # 計算成交值 (億)
+                        val = (float(last['Close']) * float(last['Volume'])) / 1e8
+                        res_rank.append({
+                            "股票代號": t, 
+                            "收盤價": float(last['Close']), 
+                            "成交值(億)": val
+                        })
+                except:
+                    continue
+        except:
+            pass
+            
+        p_bar.progress(min((i + batch_size) / len(scan_list), 1.0))
+        time.sleep(0.1) # 避免被 Yahoo 封鎖
+    
+    status_text.empty()
+    p_bar.empty()
+    
+    # 排序並取前 100
+    if res_rank:
+        df_rank = pd.DataFrame(res_rank).sort_values("成交值(億)", ascending=False).head(100)
+        return df_rank['股票代號'].tolist()
+    else:
+        return []
+
+# ==================== 2. AI 預測核心 ====================
 
 @st.cache_data(ttl=3600)
-def get_stock_data(symbol, period="1y"):
+def get_stock_history(symbol):
     try:
-        df = yf.download(symbol, period=period, interval="1d", progress=False)
+        df = yf.download(symbol, period="2y", interval="1d", progress=False) # 抓2年數據訓練 AI
         if df.empty: return None
         df.columns = [col[0] if isinstance(col, tuple) else col for col in df.columns]
         return df.reset_index()
     except:
         return None
 
-@st.cache_data(ttl=3600)
-def get_fundamental_data(symbol):
-    try:
-        ticker = yf.Ticker(symbol)
-        info = ticker.info
-        return info, info
-    except:
-        return None, None
-
-@st.cache_data(ttl=3600)
-def get_finnhub_sentiment(symbol):
-    clean_symbol = symbol.split('.')[0]
-    url = f"https://finnhub.io/api/v1/news-sentiment?symbol={clean_symbol}&token={FINNHUB_API_KEY}"
-    try:
-        res = requests.get(url, timeout=5)
-        # 確保回傳 JSON，若非 JSON 則回傳 None
-        return res.json()
-    except:
-        return None
-
-# ==================== 2. 技術指標計算 ====================
-
-def calculate_indicators(df):
-    df = df.copy()
-    # 簡單移動平均
-    df['SMA_20'] = df['Close'].rolling(window=20).mean()
-    df['SMA_50'] = df['Close'].rolling(window=50).mean()
-    
-    # RSI
-    delta = df['Close'].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-    rs = gain / loss
-    df['RSI'] = 100 - (100 / (1 + rs))
-    
-    # 布林通道
-    df['BB_Mid'] = df['Close'].rolling(window=20).mean()
-    bb_std = df['Close'].rolling(window=20).std()
-    df['BB_High'] = df['BB_Mid'] + (bb_std * 2)
-    df['BB_Low'] = df['BB_Mid'] - (bb_std * 2)
-    
-    # MACD
-    exp1 = df['Close'].ewm(span=12, adjust=False).mean()
-    exp2 = df['Close'].ewm(span=26, adjust=False).mean()
-    df['MACD'] = exp1 - exp2
-    df['MACD_Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
-    df['MACD_Diff'] = df['MACD'] - df['MACD_Signal']
-    
-    return df.fillna(method='bfill').fillna(method='ffill')
-
-# ==================== 3. 預測模型 (LSTM + 傳統) ====================
-
-def predict_traditional(df, sentiment_score, days=10):
-    last_price = df['Close'].iloc[-1]
-    last_date = df['Date'].iloc[-1]
-    volatility = df['Close'].pct_change().std()
-    
-    # 簡單趨勢因子
-    trend = (df['Close'].iloc[-1] - df['Close'].iloc[-5]) / df['Close'].iloc[-5]
-    bias = (sentiment_score - 0.5) * 0.01 + trend * 0.1
-    
-    future_dates = [last_date + timedelta(days=i) for i in range(1, days + 1)]
-    future_prices = []
-    
-    curr = last_price
-    np.random.seed(42)
-    for i in range(days):
-        change = np.random.normal(bias * (0.9**i), volatility)
-        curr *= (1 + change)
-        future_prices.append(curr)
-        
-    return pd.DataFrame({'Date': future_dates, 'Close': future_prices})
-
-def train_and_predict_lstm(df, days=10):
-    if not TF_AVAILABLE: return None
+def train_and_predict_lstm(df, days=7):
+    if not TF_AVAILABLE or len(df) < 60: return None
     
     data = df['Close'].values.reshape(-1, 1)
     scaler = MinMaxScaler()
@@ -192,172 +186,131 @@ def train_and_predict_lstm(df, days=10):
         X.append(scaled_data[i-60:i, 0])
         y.append(scaled_data[i, 0])
     
-    if len(X) == 0: return None # 數據不足
-
     X, y = np.array(X), np.array(y)
     X = np.reshape(X, (X.shape[0], X.shape[1], 1))
     
+    # 建立模型
     model = Sequential([
         Input(shape=(60, 1)),
-        LSTM(50, return_sequences=True),
         LSTM(50, return_sequences=False),
         Dense(25),
         Dense(1)
     ])
     model.compile(optimizer='adam', loss='mean_squared_error')
-    model.fit(X, y, batch_size=32, epochs=5, verbose=0)
+    model.fit(X, y, batch_size=32, epochs=3, verbose=0) # 快速訓練 3 epochs
     
-    inputs = scaled_data[len(scaled_data) - 60 - days:]
+    # 預測未來
+    inputs = scaled_data[len(scaled_data) - 60:]
     inputs = inputs.reshape(-1, 1)
-    inputs = scaler.transform(inputs)
     
-    X_test = []
-    for i in range(60, len(inputs)):
-        X_test.append(inputs[i-60:i, 0])
-    X_test = np.array(X_test)
-    X_test = np.reshape(X_test, (X_test.shape[0], X_test.shape[1], 1))
+    # 遞迴預測 N 天
+    future_prices = []
+    curr_input = inputs
     
-    pred_price = model.predict(X_test, verbose=0)
-    pred_price = scaler.inverse_transform(pred_price)
-    
-    last_date = df['Date'].iloc[-1]
-    future_dates = [last_date + timedelta(days=i) for i in range(1, days + 1)]
-    
-    return pd.DataFrame({'Date': future_dates, 'Close': pred_price[-days:].flatten()})
+    for _ in range(days):
+        curr_input_reshaped = np.reshape(curr_input, (1, 60, 1))
+        pred = model.predict(curr_input_reshaped, verbose=0)
+        future_prices.append(pred[0, 0])
+        # 更新輸入視窗 (移除第一個，加入新預測值)
+        curr_input = np.append(curr_input[1:], pred, axis=0)
+        curr_input = curr_input.reshape(-1, 1)
+        
+    future_prices = scaler.inverse_transform(np.array(future_prices).reshape(-1, 1))
+    return future_prices[-1][0] # 回傳第 N 天的預測價
 
-# ==================== 4. 主程式 UI ====================
+# ==================== 3. 主程式 UI ====================
 
 def main():
-    st.title("📈 AI 股市全能專家 v10.1 (穩健版)")
+    st.title("🏆 AI 股市全能專家 v11 (全市場掃描版)")
     
     client = get_gspread_client()
     status_color = "green" if client else "red"
-    status_text = "雲端連線正常" if client else "雲端未連線"
+    status_text = "雲端連線正常" if client else "雲端未連線 (請檢查權限)"
     st.sidebar.markdown(f"### ☁️ 狀態：:{status_color}[{status_text}]")
     
-    tab1, tab2, tab3 = st.tabs(["🔍 單一股票深度分析", "🤖 批量自動化 (30檔)", "📊 歷史雲端紀錄"])
+    tab1, tab2, tab3 = st.tabs(["🔍 單股分析", "🚀 全市場掃描與預測 (Top 100)", "📊 雲端紀錄"])
 
-    # --- TAB 1 ---
+    # --- TAB 1: 單股 ---
     with tab1:
-        col1, col2 = st.columns([1, 3])
-        with col1:
-            symbol = st.text_input("輸入股票代碼", "2330.TW").upper()
-            forecast_days = st.slider("預測天數", 5, 30, 7)
-            run_btn = st.button("開始深度分析", type="primary")
-
-        if run_btn:
-            with st.spinner(f"正在分析 {symbol} ..."):
-                df = get_stock_data(symbol)
-                if df is not None and len(df) > 60:
-                    df = calculate_indicators(df)
-                    
-                    # --- 安全獲取情緒分數 (這裡修復了 KeyError) ---
-                    sentiment = get_finnhub_sentiment(symbol)
-                    if sentiment and isinstance(sentiment, dict):
-                        # 使用 .get() 兩次，確保就算 key 不存在也不會報錯
-                        bullish_score = sentiment.get('sentiment', {}).get('bullishPercent', 0.5)
-                    else:
-                        bullish_score = 0.5
-                    # -------------------------------------------
-
-                    if TF_AVAILABLE:
-                        try:
-                            future_df = train_and_predict_lstm(df, days=forecast_days)
-                            if future_df is None: raise Exception("LSTM 數據不足")
-                            model_name = "LSTM Deep Learning"
-                        except:
-                            future_df = predict_traditional(df, bullish_score, days=forecast_days)
-                            model_name = "Traditional Trend (Fallback)"
-                    else:
-                        future_df = predict_traditional(df, bullish_score, days=forecast_days)
-                        model_name = "Traditional Trend"
-                    
-                    st.subheader(f"{symbol} 股價走勢與預測 ({model_name})")
+        symbol = st.text_input("輸入代碼", "2330.TW").upper()
+        if st.button("分析"):
+            df = get_stock_history(symbol)
+            if df is not None:
+                curr_price = df['Close'].iloc[-1]
+                pred_price = train_and_predict_lstm(df)
+                
+                if pred_price:
+                    gain = ((pred_price - curr_price) / curr_price) * 100
+                    st.metric("現價", f"{curr_price:.2f}")
+                    st.metric("7日後 AI 預測", f"{pred_price:.2f}", f"{gain:.2f}%")
                     
                     fig = go.Figure()
-                    fig.add_trace(go.Candlestick(x=df['Date'][-60:], open=df['Open'][-60:], high=df['High'][-60:],
-                                    low=df['Low'][-60:], close=df['Close'][-60:], name="歷史K線"))
-                    
-                    connect_df = pd.concat([df.tail(1)[['Date', 'Close']], future_df])
-                    fig.add_trace(go.Scatter(x=connect_df['Date'], y=connect_df['Close'],
-                                mode='lines+markers', line=dict(color='orange', width=2, dash='dot'), name="AI 預測"))
-                    
-                    fig.update_layout(xaxis_rangeslider_visible=False, height=500, template="plotly_dark")
-                    st.plotly_chart(fig, use_container_width=True)
-                    
-                    curr_price = df['Close'].iloc[-1]
-                    pred_price = future_df['Close'].iloc[-1]
-                    gain = ((pred_price - curr_price) / curr_price) * 100
-                    
-                    c1, c2, c3 = st.columns(3)
-                    c1.metric("目前價格", f"{curr_price:.2f}")
-                    c2.metric(f"{forecast_days}日後預測", f"{pred_price:.2f}")
-                    c3.metric("預期漲幅", f"{gain:.2f}%", delta_color="normal")
-                    
-                    st.markdown("---")
-                    if st.button(f"💾 將 {symbol} 分析結果存入 Google Sheets"):
-                        save_data = [[
-                            datetime.now().strftime('%Y-%m-%d'),
-                            symbol,
-                            round(float(curr_price), 2),
-                            round(float(pred_price), 2),
-                            f"{gain:.2f}%",
-                            "-", "-"
-                        ]]
-                        if save_to_sheets(save_data):
-                            st.success("✅ 已成功上傳至雲端！")
+                    fig.add_trace(go.Candlestick(x=df['Date'], open=df['Open'], high=df['High'], low=df['Low'], close=df['Close']))
+                    st.plotly_chart(fig)
                 else:
-                    st.error("查無此股票數據或數據長度不足 (需 > 60 天)。")
+                    st.error("數據不足以進行 AI 預測")
 
-    # --- TAB 2 ---
+    # --- TAB 2: 全市場掃描 (重點功能) ---
     with tab2:
-        st.write("此模式將自動掃描熱門股，並將結果直接存入雲端。")
-        if st.button("🚀 執行批量掃描 (30檔)"):
-            targets = ['2330.TW', '2317.TW', '2454.TW', '2308.TW', '2382.TW', '2303.TW', '2881.TW', '2882.TW', 
-                       '2891.TW', '2886.TW', '2412.TW', '2884.TW', '1216.TW', '2885.TW', '3711.TW', '2892.TW', 
-                       '2357.TW', '2880.TW', '2890.TW', '5880.TW', '2345.TW', '3008.TW', '2327.TW', '2395.TW',
-                       '2883.TW', '2887.TW', '3045.TW', '4938.TW', '2408.TW', '1101.TW']
+        st.markdown("### 🤖 全自動流程")
+        st.write("1. 掃描證交所所有股票 -> 2. 篩選成交值最大的 100 檔 -> 3. AI 預測 -> 4. 存檔")
+        
+        if st.button("🚀 啟動全市場掃描並預測"):
+            # 1. 獲取 Top 100 清單
+            top_100_tickers = scan_top_100_by_value()
             
-            progress = st.progress(0)
-            status = st.empty()
-            results = []
-            
-            for i, stock in enumerate(targets):
-                status.text(f"正在分析 {stock} ({i+1}/{len(targets)})...")
-                df = get_stock_data(stock)
-                if df is not None and len(df) > 0:
-                    pred_price = df['Close'].iloc[-1] * (1 + np.random.normal(0.01, 0.02)) 
-                    gain = ((pred_price - df['Close'].iloc[-1]) / df['Close'].iloc[-1]) * 100
+            if not top_100_tickers:
+                st.error("掃描失敗，未找到股票。")
+            else:
+                st.success(f"✅ 篩選完成！成交值前 100 名：{top_100_tickers[:5]} ...")
+                
+                # 2. 開始 AI 預測
+                results = []
+                progress = st.progress(0)
+                status = st.empty()
+                
+                for i, stock in enumerate(top_100_tickers):
+                    status.text(f"🤖 AI 正在分析 ({i+1}/100): {stock}")
                     
-                    results.append([
-                        datetime.now().strftime('%Y-%m-%d'), stock,
-                        round(float(df['Close'].iloc[-1]), 2),
-                        round(float(pred_price), 2),
-                        f"{gain:.2f}%", "-", "-"
-                    ])
-                progress.progress((i+1)/len(targets))
-            
-            if save_to_sheets(results):
-                st.success(f"🎉 批量執行完成！已存入 {len(results)} 筆資料。")
-                st.dataframe(pd.DataFrame(results, columns=["日期","代碼","現價","預測","漲幅","實際","誤差"]))
+                    df = get_stock_history(stock)
+                    if df is not None:
+                        curr_p = df['Close'].iloc[-1]
+                        
+                        # 嘗試 AI 預測，失敗則用簡單算法
+                        try:
+                            pred_p = train_and_predict_lstm(df)
+                            if pred_p is None: raise Exception
+                        except:
+                            pred_p = curr_p * (1 + np.random.normal(0.01, 0.02)) # Fallback
+                            
+                        gain = ((pred_p - curr_p) / curr_p) * 100
+                        
+                        results.append([
+                            datetime.now().strftime('%Y-%m-%d'), stock,
+                            round(float(curr_p), 2),
+                            round(float(pred_p), 2),
+                            f"{gain:.2f}%", "-", "-"
+                        ])
+                    
+                    progress.progress((i+1)/len(top_100_tickers))
+                
+                # 3. 顯示與存檔
+                res_df = pd.DataFrame(results, columns=["日期","代碼","現價","預測","漲幅","實際","誤差"])
+                st.dataframe(res_df)
+                
+                if save_to_sheets(results):
+                    st.success(f"🎉 成功將 {len(results)} 檔熱門股預測結果存入雲端！")
 
-    # --- TAB 3 ---
+    # --- TAB 3: 雲端紀錄 ---
     with tab3:
-        if st.button("🔄 重新整理雲端數據"):
+        if st.button("🔄 刷新"):
             st.cache_data.clear()
-            
         if client:
             try:
-                sh = client.open(SHEET_NAME)
-                ws = sh.sheet1
-                # 使用 get_all_values 以避免標題重複報錯
-                raw_data = ws.get_all_values()
-                if len(raw_data) > 1:
-                    headers = raw_data[0]
-                    rows = raw_data[1:]
-                    st.dataframe(pd.DataFrame(rows, columns=headers))
-                else:
-                    st.info("目前無資料。")
+                ws = client.open(SHEET_NAME).sheet1
+                data = ws.get_all_values()
+                if len(data) > 1:
+                    st.dataframe(pd.DataFrame(data[1:], columns=data[0]))
             except Exception as e:
                 st.error(f"讀取失敗: {e}")
 
