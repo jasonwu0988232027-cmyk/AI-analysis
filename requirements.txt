@@ -1,5 +1,5 @@
 streamlit
-yfinance>=0.2.36
+yfinance
 pandas
 numpy
 requests
@@ -7,6 +7,6 @@ plotly
 tensorflow
 scikit-learn
 gspread
-oauth2client
+google-auth
 urllib3
 certifi
