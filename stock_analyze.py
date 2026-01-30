@@ -2,13 +2,12 @@ import streamlit as st
 import importlib.metadata
 
 # --- 頁面配置（必須在最前面）---
-st.set_page_config(page_title="AI 股市全能專家 v10 (整合版)", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="AI 股市全能專家 v10.1 (穩健版)", layout="wide", initial_sidebar_state="expanded")
 
-# --- 檢測套件版本 (確保環境正確) ---
+# --- 檢測套件版本 ---
 try:
     gspread_version = importlib.metadata.version("gspread")
     auth_version = importlib.metadata.version("google-auth")
-    # st.sidebar.success(f"📦 環境檢測：gspread v{gspread_version} | google-auth v{auth_version}")
 except:
     pass
 
@@ -57,7 +56,7 @@ CREDENTIALS_JSON = "credentials.json"
 SHEET_NAME = "Stock_Predictions_History"
 LOOKBACK_DAYS = 60
 
-# ==================== 0. 雲端連線模組 (來自 v9.2) ====================
+# ==================== 0. 雲端連線模組 ====================
 
 def get_gspread_client():
     scopes = ['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive']
@@ -85,6 +84,7 @@ def save_to_sheets(new_data):
     try:
         sh = client.open(SHEET_NAME)
         ws = sh.sheet1
+        # 檢查 A1 是否有值，避免標題重複
         if ws.row_count > 0:
             val = ws.acell('A1').value
             if not val:
@@ -121,7 +121,9 @@ def get_finnhub_sentiment(symbol):
     clean_symbol = symbol.split('.')[0]
     url = f"https://finnhub.io/api/v1/news-sentiment?symbol={clean_symbol}&token={FINNHUB_API_KEY}"
     try:
-        return requests.get(url, timeout=5).json()
+        res = requests.get(url, timeout=5)
+        # 確保回傳 JSON，若非 JSON 則回傳 None
+        return res.json()
     except:
         return None
 
@@ -178,7 +180,6 @@ def predict_traditional(df, sentiment_score, days=10):
         
     return pd.DataFrame({'Date': future_dates, 'Close': future_prices})
 
-# LSTM 簡化版 (為了整合穩定性)
 def train_and_predict_lstm(df, days=10):
     if not TF_AVAILABLE: return None
     
@@ -190,6 +191,9 @@ def train_and_predict_lstm(df, days=10):
     for i in range(60, len(scaled_data)):
         X.append(scaled_data[i-60:i, 0])
         y.append(scaled_data[i, 0])
+    
+    if len(X) == 0: return None # 數據不足
+
     X, y = np.array(X), np.array(y)
     X = np.reshape(X, (X.shape[0], X.shape[1], 1))
     
@@ -201,9 +205,8 @@ def train_and_predict_lstm(df, days=10):
         Dense(1)
     ])
     model.compile(optimizer='adam', loss='mean_squared_error')
-    model.fit(X, y, batch_size=32, epochs=5, verbose=0) # 快速訓練
+    model.fit(X, y, batch_size=32, epochs=5, verbose=0)
     
-    # 預測
     inputs = scaled_data[len(scaled_data) - 60 - days:]
     inputs = inputs.reshape(-1, 1)
     inputs = scaler.transform(inputs)
@@ -220,15 +223,13 @@ def train_and_predict_lstm(df, days=10):
     last_date = df['Date'].iloc[-1]
     future_dates = [last_date + timedelta(days=i) for i in range(1, days + 1)]
     
-    # 這裡只取最後 N 天作為未來預測 (簡化邏輯)
     return pd.DataFrame({'Date': future_dates, 'Close': pred_price[-days:].flatten()})
 
 # ==================== 4. 主程式 UI ====================
 
 def main():
-    st.title("📈 AI 股市全能專家 v10 (整合版)")
+    st.title("📈 AI 股市全能專家 v10.1 (穩健版)")
     
-    # 側邊欄狀態
     client = get_gspread_client()
     status_color = "green" if client else "red"
     status_text = "雲端連線正常" if client else "雲端未連線"
@@ -236,7 +237,7 @@ def main():
     
     tab1, tab2, tab3 = st.tabs(["🔍 單一股票深度分析", "🤖 批量自動化 (30檔)", "📊 歷史雲端紀錄"])
 
-    # --- TAB 1: 單一股票深度分析 (結合你的新 UI) ---
+    # --- TAB 1 ---
     with tab1:
         col1, col2 = st.columns([1, 3])
         with col1:
@@ -247,33 +248,36 @@ def main():
         if run_btn:
             with st.spinner(f"正在分析 {symbol} ..."):
                 df = get_stock_data(symbol)
-                if df is not None:
+                if df is not None and len(df) > 60:
                     df = calculate_indicators(df)
                     
-                    # 取得基本面與情緒
+                    # --- 安全獲取情緒分數 (這裡修復了 KeyError) ---
                     sentiment = get_finnhub_sentiment(symbol)
-                    bullish_score = sentiment['sentiment'].get('bullishPercent', 0.5) if sentiment else 0.5
-                    
-                    # 預測 (優先嘗試 LSTM)
+                    if sentiment and isinstance(sentiment, dict):
+                        # 使用 .get() 兩次，確保就算 key 不存在也不會報錯
+                        bullish_score = sentiment.get('sentiment', {}).get('bullishPercent', 0.5)
+                    else:
+                        bullish_score = 0.5
+                    # -------------------------------------------
+
                     if TF_AVAILABLE:
                         try:
                             future_df = train_and_predict_lstm(df, days=forecast_days)
+                            if future_df is None: raise Exception("LSTM 數據不足")
                             model_name = "LSTM Deep Learning"
                         except:
                             future_df = predict_traditional(df, bullish_score, days=forecast_days)
-                            model_name = "Traditional Trend"
+                            model_name = "Traditional Trend (Fallback)"
                     else:
                         future_df = predict_traditional(df, bullish_score, days=forecast_days)
                         model_name = "Traditional Trend"
                     
-                    # --- 繪圖區 ---
                     st.subheader(f"{symbol} 股價走勢與預測 ({model_name})")
                     
                     fig = go.Figure()
                     fig.add_trace(go.Candlestick(x=df['Date'][-60:], open=df['Open'][-60:], high=df['High'][-60:],
                                     low=df['Low'][-60:], close=df['Close'][-60:], name="歷史K線"))
                     
-                    # 連接線與預測
                     connect_df = pd.concat([df.tail(1)[['Date', 'Close']], future_df])
                     fig.add_trace(go.Scatter(x=connect_df['Date'], y=connect_df['Close'],
                                 mode='lines+markers', line=dict(color='orange', width=2, dash='dot'), name="AI 預測"))
@@ -281,7 +285,6 @@ def main():
                     fig.update_layout(xaxis_rangeslider_visible=False, height=500, template="plotly_dark")
                     st.plotly_chart(fig, use_container_width=True)
                     
-                    # --- 結果數據與存檔 ---
                     curr_price = df['Close'].iloc[-1]
                     pred_price = future_df['Close'].iloc[-1]
                     gain = ((pred_price - curr_price) / curr_price) * 100
@@ -291,7 +294,6 @@ def main():
                     c2.metric(f"{forecast_days}日後預測", f"{pred_price:.2f}")
                     c3.metric("預期漲幅", f"{gain:.2f}%", delta_color="normal")
                     
-                    # 【整合關鍵】存檔按鈕
                     st.markdown("---")
                     if st.button(f"💾 將 {symbol} 分析結果存入 Google Sheets"):
                         save_data = [[
@@ -304,12 +306,10 @@ def main():
                         ]]
                         if save_to_sheets(save_data):
                             st.success("✅ 已成功上傳至雲端！")
-                        else:
-                            st.error("存檔失敗，請檢查連線。")
                 else:
-                    st.error("查無此股票數據。")
+                    st.error("查無此股票數據或數據長度不足 (需 > 60 天)。")
 
-    # --- TAB 2: 批量自動化 (我們之前修好的功能) ---
+    # --- TAB 2 ---
     with tab2:
         st.write("此模式將自動掃描熱門股，並將結果直接存入雲端。")
         if st.button("🚀 執行批量掃描 (30檔)"):
@@ -325,9 +325,8 @@ def main():
             for i, stock in enumerate(targets):
                 status.text(f"正在分析 {stock} ({i+1}/{len(targets)})...")
                 df = get_stock_data(stock)
-                if df is not None:
-                    # 簡易預測以加快速度
-                    pred_price = df['Close'].iloc[-1] * (1 + np.random.normal(0.01, 0.02)) # 模擬預測
+                if df is not None and len(df) > 0:
+                    pred_price = df['Close'].iloc[-1] * (1 + np.random.normal(0.01, 0.02)) 
                     gain = ((pred_price - df['Close'].iloc[-1]) / df['Close'].iloc[-1]) * 100
                     
                     results.append([
@@ -342,7 +341,7 @@ def main():
                 st.success(f"🎉 批量執行完成！已存入 {len(results)} 筆資料。")
                 st.dataframe(pd.DataFrame(results, columns=["日期","代碼","現價","預測","漲幅","實際","誤差"]))
 
-    # --- TAB 3: 歷史紀錄 (讀取雲端) ---
+    # --- TAB 3 ---
     with tab3:
         if st.button("🔄 重新整理雲端數據"):
             st.cache_data.clear()
@@ -351,6 +350,7 @@ def main():
             try:
                 sh = client.open(SHEET_NAME)
                 ws = sh.sheet1
+                # 使用 get_all_values 以避免標題重複報錯
                 raw_data = ws.get_all_values()
                 if len(raw_data) > 1:
                     headers = raw_data[0]
