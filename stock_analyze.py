@@ -19,7 +19,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # 載入必要庫 (改用 google-auth)
 try:
     import gspread
-    from google.oauth2.service_account import Credentials # <--- 這是新的
+    from google.oauth2.service_account import Credentials # <--- 這是新的關鍵套件
     import tensorflow as tf
     from sklearn.preprocessing import MinMaxScaler
 except ImportError:
@@ -57,6 +57,7 @@ def get_stock_data(symbol, period="1y"):
 # ==================== 2. 雲端同步模組 (改用 google-auth) ====================
 
 def get_gspread_client():
+    # 定義權限範圍
     scopes = [
         'https://www.googleapis.com/auth/spreadsheets',
         'https://www.googleapis.com/auth/drive'
