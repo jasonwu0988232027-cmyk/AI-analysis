@@ -8,3 +8,5 @@ tensorflow
 scikit-learn
 gspread
 oauth2client
+urllib3
+certifi
